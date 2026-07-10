@@ -24,12 +24,15 @@ A minimal replica of the meteorological visualization from
     ├── index.html               # four stacked canvases (#map, #overlay, #lines, #animation) + burger-menu HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
     ├── js/wind.js               # the whole engine (~600 lines, no build step)
-    ├── js/menu.js               # burger-menu toggle + Atmosphere/Ocean tab switching (~30 lines)
+    ├── js/menu.js               # burger-menu toggle, tab switching, layer-change dispatch (~40 lines)
     ├── libs/
     │   ├── d3.v7.min.js         # vendored D3 v7
     │   └── topojson-client.min.js
     └── data/
-        ├── current-wind-surface-level-gfs-0.25.json  # GFS u/v wind, 0.25°×0.25°, grib2json format (~9.2 MB)
+        ├── current-wind-surface-level-gfs-0.25.json  # GFS 10 m u/v wind, 0.25°×0.25°, grib2json format (~9.2 MB)
+        ├── current-wind-1000hpa-gfs-0.25.json        # GFS u/v wind @ 1000 hPa (~9.2 MB)
+        ├── current-wind-500hpa-gfs-0.25.json         # GFS u/v wind @ 500 hPa (~9.5 MB)
+        ├── current-wind-10hpa-gfs-0.25.json          # GFS u/v wind @ 10 hPa (~10 MB)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
@@ -118,11 +121,20 @@ format. **Last refreshed: GFS analysis 2026-07-10 00:00 UTC.** Upgraded 1° → 
 sample shipped with cambecc/earth. The HUD's "Data:" line always shows the loaded snapshot's
 timestamp.
 
+Three pressure-level datasets (added 2026-07-10, all GFS analysis 2026-07-10 06:00 UTC) sit
+beside it: `current-wind-{1000hpa,500hpa,10hpa}-gfs-0.25.json` — UGRD/VGRD on isobaric
+surfaces via the same filter CGI (`lev_1000_mb`/`lev_500_mb`/`lev_10_mb`). The engine's
+`LAYERS` registry maps menu layer ids to these files; `buildGrid()` is level-agnostic
+(records are picked by parameterCategory/Number only) and the data-driven streak guard and
+color scale absorb the much faster jet-stream (500 hPa) and polar-night-jet (10 hPa) winds
+with no per-level tuning.
+
 To refresh (preferred path, verified working — no Java needed):
 
 ```sh
 python3 -m venv gribenv && ./gribenv/bin/pip install pygrib
-./gribenv/bin/python scripts/refresh_wind.py
+./gribenv/bin/python scripts/refresh_wind.py            # surface (10 m)
+./gribenv/bin/python scripts/refresh_wind.py 500hpa     # or: 1000hpa, 10hpa
 ```
 
 The script finds the newest published GFS cycle on NOMADS (walking back 6 h at a time — cycles
@@ -240,7 +252,12 @@ status line; page/HUD title is plain "earth", per user request). The burger butt
 
    - **Tabs** — hierarchical and exclusive: one top-level domain active at a time, and each
      domain displays exactly **one** layer (unlike nullschool, layers are never combined).
-     Atmosphere holds the current "Wind @ Surface" render. An **Ocean tab** (with "Currents"
+     Atmosphere holds four wind layers: **Surface (10 m), 1000 hPa, 500 hPa, 10 hPa** —
+     buttons carry `data-layer` ids matching the `LAYERS` registry in `wind.js`; clicking
+     dispatches a `layerchange` CustomEvent, and `loadLayer()` in the engine swaps the
+     dataset, restarts the pipeline, and syncs the active-button state (single source of
+     truth). `#layer=<id>` in the URL hash selects the initial layer (also the
+     headless-testing hook, since the menu needs a click). An **Ocean tab** (with "Currents"
      and "Temperature" layers) is written but commented out in `index.html` — the user asked
      not to show it until those pages are ready; uncomment the two marked blocks to enable.
    - Data source + snapshot date lines, the color-scale bar, the click-for-wind-speed
@@ -257,8 +274,10 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
 ## Next steps
 
    - **Ocean layers**: build real "Currents" and "Temperature" pages (e.g., OSCAR currents /
-     RTGS SST) with a layer-switching hook in `wind.js` (the wind layer is hardcoded), then
-     uncomment the Ocean tab blocks in `index.html`.
+     RTGS SST), then uncomment the Ocean tab blocks in `index.html`. The layer-switching
+     plumbing now exists (`LAYERS` registry + `loadLayer()` + `layerchange` event, built for
+     the pressure-level wind layers) — ocean layers mainly need their data pipelines and,
+     for temperature, a scalar-overlay render mode (no particles).
    - Automate data refresh (e.g., a GitHub Action running `scripts/refresh_wind.py` every 6 h
      and redeploying) — otherwise the deployed snapshot goes stale from deploy day.
    - Touch pinch-zoom (only wheel zoom is implemented). A read-only URL-hash initial view
@@ -268,7 +287,11 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
 
 ## Version control / Feature deployment structure
 
-Agreed branching model for growing the project beyond:
+Agreed branching model for growing the project beyond surface wind. **Executed 2026-07-10**
+for the pressure-level wind layers: `refactor/layer-engine` merged first (`LAYERS` registry +
+`loadLayer()` + per-level refresh script), then `feature/wind-1000hpa`, `feature/wind-500hpa`
+and `feature/wind-10hpa` — each branched off updated `main` sequentially, verified headlessly
+via the `#layer=<id>` hash before merging with `--no-ff`. Branches kept locally; not pushed.
 
 - **`main` is the only long-lived branch**, always deployable. Vercel's production deployment
   points at it. Everything else is short-lived: branch off `main`, build, merge, delete.
