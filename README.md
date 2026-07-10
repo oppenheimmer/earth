@@ -370,5 +370,6 @@ its current state in one extended session):
   their scalar overlay — same branch-verify-merge flow; surface wind data refreshed to 06z on
   `main` first so all layers share one GFS cycle.
 - **Repo hygiene** — `__pycache__` ignored; `?v=` cache-busting removed for simplicity;
-  README maintained as the cross-session handoff document; history pushed to GitHub
-  (main + the four work branches).
+  README maintained as the cross-session handoff document; history pushed to GitHub.
+  All work branches (4× wind, 3× scalar, 2× refactor) were deleted after merging — their
+  history survives in the `--no-ff` merge commits; only `main` remains.
