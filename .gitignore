@@ -1,0 +1,6 @@
+.vercel
+node_modules
+.DS_Store
+.claude/settings.local.json
+CLAUDE.md
+__pycache__/
