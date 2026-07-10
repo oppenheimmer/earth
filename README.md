@@ -33,6 +33,9 @@ A minimal replica of the meteorological visualization from
         ├── current-wind-1000hpa-gfs-0.25.json        # GFS u/v wind @ 1000 hPa (~9.2 MB)
         ├── current-wind-500hpa-gfs-0.25.json         # GFS u/v wind @ 500 hPa (~9.5 MB)
         ├── current-wind-10hpa-gfs-0.25.json          # GFS u/v wind @ 10 hPa (~10 MB)
+        ├── current-temp-surface-level-gfs-0.25.json  # GFS 2 m temperature (~6 MB)
+        ├── current-rh-surface-level-gfs-0.25.json    # GFS 2 m relative humidity (~5 MB)
+        ├── current-dewpoint-surface-level-gfs-0.25.json  # GFS 2 m dew point (~6 MB)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
@@ -129,12 +132,21 @@ surfaces via the same filter CGI (`lev_1000_mb`/`lev_500_mb`/`lev_10_mb`). The e
 color scale absorb the much faster jet-stream (500 hPa) and polar-night-jet (10 hPa) winds
 with no per-level tuning.
 
+Three **scalar overlay datasets** (added 2026-07-10, same 06z cycle) drive the combined
+layers: 2 m TMP / RH / DPT as single-record grib2json files
+(`current-{temp,rh,dewpoint}-surface-level-gfs-0.25.json`). A combined layer pairs surface
+wind (particle trails) with a scalar field colored through a d3-scale-chromatic colormap LUT
+(the vendored D3 bundle ships them): **Temperature → inferno (233.15–323.15 K), Relative
+humidity → Purples (0–100 %), Dew point → PuBuGn (233.15–308.15 K)**. The scale bar and the
+click readout follow the active layer (`overlaySpec.format`; scalar value · wind speed).
+
 To refresh (preferred path, verified working — no Java needed):
 
 ```sh
 python3 -m venv gribenv && ./gribenv/bin/pip install pygrib
-./gribenv/bin/python scripts/refresh_wind.py            # surface (10 m)
+./gribenv/bin/python scripts/refresh_wind.py            # surface (10 m) wind
 ./gribenv/bin/python scripts/refresh_wind.py 500hpa     # or: 1000hpa, 10hpa
+./gribenv/bin/python scripts/refresh_wind.py temperature  # or: rh, dew (2 m scalars)
 ```
 
 The script finds the newest published GFS cycle on NOMADS (walking back 6 h at a time — cycles
@@ -252,8 +264,11 @@ status line; page/HUD title is plain "earth", per user request). The burger butt
 
    - **Tabs** — hierarchical and exclusive: one top-level domain active at a time, and each
      domain displays exactly **one** layer (unlike nullschool, layers are never combined).
-     Atmosphere holds four wind layers: **Surface (10 m), 1000 hPa, 500 hPa, 10 hPa** —
-     buttons carry `data-layer` ids matching the `LAYERS` registry in `wind.js`; clicking
+     Atmosphere holds seven layers: four wind layers (**Surface (10 m), 1000 hPa, 500 hPa,
+     10 hPa** — wind-speed sinebow overlay) and three combined layers (**Temperature,
+     Humidity, Dew Point** — surface-wind particle trails over a 2 m scalar field with
+     inferno / Purples / PuBuGn colormaps; scale bar and click readout switch with the
+     layer). Buttons carry `data-layer` ids matching the `LAYERS` registry in `wind.js`; clicking
      dispatches a `layerchange` CustomEvent, and `loadLayer()` in the engine swaps the
      dataset, restarts the pipeline, and syncs the active-button state (single source of
      truth). `#layer=<id>` in the URL hash selects the initial layer (also the
@@ -343,6 +358,13 @@ its current state in one extended session):
   event, `#layer=<id>` hash; three new GFS layers (1000 hPa, 500 hPa, 10 hPa @ 06z) delivered
   via `--no-ff` feature branches (`feature/wind-1000hpa`, `feature/wind-500hpa`,
   `feature/wind-10hpa`) per the branching model above, each verified headlessly pre-merge.
+- **Scalar-overlay engine + combined layers** — `refactor/scalar-overlay` added
+  `buildScalarGrid()`, d3-scale-chromatic colormap LUTs, `overlayColorAt()` dispatch (full-res
+  field + drag preview), per-layer scale bar/label and click readout, and scalar products in
+  the refresh script (2 m TMP/RH/DPT). Then `feature/Temperature` (inferno),
+  `feature/RH` (Purples) and `feature/Dew` (PuBuGn) each paired surface-wind trails with
+  their scalar overlay — same branch-verify-merge flow; surface wind data refreshed to 06z on
+  `main` first so all layers share one GFS cycle.
 - **Repo hygiene** — `__pycache__` ignored; `?v=` cache-busting removed for simplicity;
   README maintained as the cross-session handoff document; history pushed to GitHub
   (main + the four work branches).
