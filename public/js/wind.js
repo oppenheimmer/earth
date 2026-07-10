@@ -760,6 +760,13 @@
             min: 233.15, max: 323.15,  // -40 – 50 °C
             scaleLabel: "-40 &ndash; 50 &deg;C",
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
+        }},
+        "rh": {file: SURFACE_WIND, label: "Rel. Humidity @ Surface", scalar: {
+            file: "data/current-rh-surface-level-gfs-0.25.json",
+            lut: colormapLut(d3.interpolatePurples),
+            min: 0, max: 100,
+            scaleLabel: "0 &ndash; 100 %",
+            format: function (v) { return v.toFixed(0) + " %"; }
         }}
     };
     var DEFAULT_LAYER = "surface";
