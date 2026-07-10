@@ -185,6 +185,71 @@
         return {interpolate: interpolate, date: validTime, maxSpeed: Math.sqrt(maxSpeed2)};
     }
 
+    /**
+     * Builds an interpolating grid from a single-record scalar dataset (temperature, RH, …):
+     * same regular lat/lon layout as buildGrid, one value per cell.
+     */
+    function buildScalarGrid(records) {
+        var header = records[0].header;
+        var data = records[0].data;
+        var λ0 = header.lo1, φ0 = header.la1;
+        var Δλ = header.dx, Δφ = header.dy;
+        var ni = header.nx, nj = header.ny;
+
+        var grid = [], p = 0;
+        var isContinuous = Math.floor(ni * Δλ) >= 360;
+        var rowLength = ni + (isContinuous ? 1 : 0);
+        for (var j = 0; j < nj; j++) {
+            var row = new Float32Array(rowLength);
+            for (var i = 0; i < ni; i++, p++) {
+                row[i] = isValue(data[p]) ? data[p] : NaN;
+            }
+            if (isContinuous) row[ni] = row[0];
+            grid[j] = row;
+        }
+
+        function interpolate(λ, φ) {
+            var i = floorMod(λ - λ0, 360) / Δλ;
+            var j = (φ0 - φ) / Δφ;
+            var fi = Math.floor(i), ci = fi + 1;
+            var fj = Math.floor(j), cj = fj + 1;
+            var row0 = grid[fj], row1 = grid[cj];
+            if (!row0 || !row1) return null;
+            var x = i - fi, y = j - fj;
+            var v = row0[fi] * (1 - x) * (1 - y) + row0[ci] * x * (1 - y) +
+                    row1[fi] * (1 - x) * y + row1[ci] * x * y;
+            return isNaN(v) ? null : v;
+        }
+
+        var refTime = new Date(header.refTime);
+        var validTime = new Date(refTime.getTime() + (header.forecastTime || 0) * 3600 * 1000);
+        return {interpolate: interpolate, date: validTime};
+    }
+
+    /** 256-entry [r,g,b] lookup table from a d3 colormap interpolator (t in [0,1]). */
+    function colormapLut(interpolator) {
+        var lut = [];
+        for (var i = 0; i < 256; i++) {
+            var c = d3.rgb(interpolator(i / 255));
+            lut.push([Math.round(c.r), Math.round(c.g), Math.round(c.b)]);
+        }
+        return lut;
+    }
+
+    /**
+     * Overlay color at (λ, φ): the current layer's scalar field through its colormap, or the
+     * default wind-speed sinebow when the layer has no scalar. Used by the full-res field
+     * interpolation and the low-res drag preview alike.
+     */
+    function overlayColorAt(λ, φ, windMag) {
+        if (!overlaySpec) return windOverlayColor(windMag, OVERLAY_ALPHA);
+        var v = scalarGrid && scalarGrid.interpolate(λ, φ);
+        if (v === null || v === undefined) return TRANSPARENT_BLACK;
+        var t = (v - overlaySpec.min) / (overlaySpec.max - overlaySpec.min);
+        var c = overlaySpec.lut[Math.max(0, Math.min(255, Math.round(t * 255)))];
+        return [c[0], c[1], c[2], OVERLAY_ALPHA];
+    }
+
     // ------------------------------------------------------------------------------------------------
     // Globe / projection
 
@@ -418,7 +483,7 @@
                             if (wind) {
                                 var scalar = wind[2];  // magnitude in m/s, before distortion
                                 wind = distort(λ, φ, x, y, velocityScale, wind);
-                                color = windOverlayColor(scalar, OVERLAY_ALPHA);
+                                color = overlayColorAt(λ, φ, scalar);
                             }
                         }
                     }
@@ -500,7 +565,7 @@
                 if (coord && isFinite(coord[0])) {
                     var wind = grid.interpolate(coord[0], coord[1]);
                     if (wind) {
-                        var color = windOverlayColor(wind[2], OVERLAY_ALPHA);
+                        var color = overlayColorAt(coord[0], coord[1], wind[2]);
                         var k = (j * w + i) * 4;
                         data[k] = color[0];
                         data[k + 1] = color[1];
@@ -641,14 +706,18 @@
         document.getElementById("location").textContent = msg || " ";
     }
 
+    /** Paints the menu's color bar and range label for the current overlay (wind or scalar). */
     function drawScaleBar() {
         var canvas = document.getElementById("scale");
         var ctx = canvas.getContext("2d");
         for (var i = 0; i < canvas.width; i++) {
-            var rgb = windOverlayColor(i / (canvas.width - 1) * 100, 255);
+            var t = i / (canvas.width - 1);
+            var rgb = overlaySpec ? overlaySpec.lut[Math.round(t * 255)] : windOverlayColor(t * 100, 255);
             ctx.fillStyle = "rgb(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ")";
             ctx.fillRect(i, 0, 1, canvas.height);
         }
+        document.getElementById("scale-label").innerHTML =
+            overlaySpec ? overlaySpec.scaleLabel : "0 &ndash; 360 km/h";
     }
 
     function formatCoordinates(λ, φ) {
@@ -659,13 +728,16 @@
     function showLocation(point, grid) {
         var coord = projection.invert(point);
         if (!coord || !isFinite(coord[0]) || !isFinite(coord[1])) return;
+        var parts = [];
+        if (overlaySpec && scalarGrid) {
+            var v = scalarGrid.interpolate(coord[0], coord[1]);
+            if (v !== null) parts.push(overlaySpec.format(v));
+        }
         var wind = grid.interpolate(coord[0], coord[1]);
-        if (wind) {
-            setLocation((wind[2] * 3.6).toFixed(0) + " km/h @ " + formatCoordinates(coord[0], coord[1]));
-        }
-        else {
-            setLocation(formatCoordinates(coord[0], coord[1]));
-        }
+        if (wind) parts.push((wind[2] * 3.6).toFixed(0) + " km/h");
+        setLocation(parts.length ?
+            parts.join(" · ") + " @ " + formatCoordinates(coord[0], coord[1]) :
+            formatCoordinates(coord[0], coord[1]));
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -673,9 +745,12 @@
 
     // One layer is displayed at a time. Feature branches add entries here (and a
     // matching button in index.html's menu); the menu dispatches a "layerchange"
-    // event with the layer id.
+    // event with the layer id. `file` is the wind dataset that drives the particles;
+    // an optional `scalar` spec colors the overlay from a second dataset instead of
+    // wind speed: {file, lut, min, max, scaleLabel, format}.
+    var SURFACE_WIND = "data/current-wind-surface-level-gfs-0.25.json";
     var LAYERS = {
-        "surface": {file: "data/current-wind-surface-level-gfs-0.25.json", label: "Wind @ Surface"},
+        "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
         "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
         "500hpa": {file: "data/current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"},
         "10hpa": {file: "data/current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"}
@@ -685,6 +760,8 @@
     var currentCancel = {requested: false};
     var recomputeTimer = null;
     var grid = null;
+    var scalarGrid = null;    // secondary scalar field of the current layer, or null
+    var overlaySpec = null;   // the current layer's scalar spec, or null (= wind-speed overlay)
 
     function cancelWork() {
         currentCancel.requested = true;
@@ -735,11 +812,21 @@
             b.classList.toggle("active", b.dataset.layer === id);
         });
         setStatus("downloading data…");
-        fetch(layer.file, {cache: "no-cache"}).then(function (r) {
+        var fetches = [fetch(layer.file, {cache: "no-cache"}).then(function (r) {
             if (!r.ok) throw new Error("wind data: HTTP " + r.status);
             return r.json();
-        }).then(function (windData) {
-            grid = buildGrid(windData);
+        })];
+        if (layer.scalar) {
+            fetches.push(fetch(layer.scalar.file, {cache: "no-cache"}).then(function (r) {
+                if (!r.ok) throw new Error("overlay data: HTTP " + r.status);
+                return r.json();
+            }));
+        }
+        Promise.all(fetches).then(function (results) {
+            grid = buildGrid(results[0]);
+            overlaySpec = layer.scalar || null;
+            scalarGrid = layer.scalar ? buildScalarGrid(results[1]) : null;
+            drawScaleBar();
             document.getElementById("data-date").textContent = "Data: GFS analysis, " + formatDate(grid.date);
             recompute();
         }).catch(function (err) {
