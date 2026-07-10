@@ -26,4 +26,13 @@
             bodies.forEach(function (b) { b.hidden = b.dataset.tab !== tab.dataset.tab; });
         });
     });
+
+    // Layer buttons: the engine (wind.js) owns the switch and the active-state sync;
+    // the menu only announces the request.
+    document.querySelectorAll(".layer[data-layer]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+            if (btn.classList.contains("active")) return;
+            document.dispatchEvent(new CustomEvent("layerchange", {detail: btn.dataset.layer}));
+        });
+    });
 })();
