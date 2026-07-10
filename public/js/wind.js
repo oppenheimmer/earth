@@ -676,7 +676,8 @@
     // event with the layer id.
     var LAYERS = {
         "surface": {file: "data/current-wind-surface-level-gfs-0.25.json", label: "Wind @ Surface"},
-        "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"}
+        "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
+        "500hpa": {file: "data/current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"}
     };
     var DEFAULT_LAYER = "surface";
 
