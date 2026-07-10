@@ -677,7 +677,8 @@
     var LAYERS = {
         "surface": {file: "data/current-wind-surface-level-gfs-0.25.json", label: "Wind @ Surface"},
         "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
-        "500hpa": {file: "data/current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"}
+        "500hpa": {file: "data/current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"},
+        "10hpa": {file: "data/current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"}
     };
     var DEFAULT_LAYER = "surface";
 
