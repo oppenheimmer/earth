@@ -291,7 +291,7 @@ Agreed branching model for growing the project beyond surface wind. **Executed 2
 for the pressure-level wind layers: `refactor/layer-engine` merged first (`LAYERS` registry +
 `loadLayer()` + per-level refresh script), then `feature/wind-1000hpa`, `feature/wind-500hpa`
 and `feature/wind-10hpa` — each branched off updated `main` sequentially, verified headlessly
-via the `#layer=<id>` hash before merging with `--no-ff`. Branches kept locally; not pushed.
+via the `#layer=<id>` hash before merging with `--no-ff`.
 
 - **`main` is the only long-lived branch**, always deployable. Vercel's production deployment
   points at it. Everything else is short-lived: branch off `main`, build, merge, delete.
@@ -316,3 +316,33 @@ via the `#layer=<id>` hash before merging with `--no-ff`. Branches kept locally;
 - **Avoid** a `develop` branch or gitflow (pure ceremony at this scale) and long-lived
   parallel feature branches — the features share the engine, so divergence is the main risk
   and prompt merges are the cure.
+
+## Changes
+
+All of the below landed on 2026-07-10 (the project went from the stock cambecc/earth port to
+its current state in one extended session):
+
+- **Live data** — replaced the 2014-01-31 1° sample with current GFS analyses; resolution
+  upgraded 1° → 0.5° → 0.25° (nullschool parity). New pygrib-based `scripts/refresh_wind.py`
+  (no Java), later parameterized by level.
+- **Bug fixes** (details under [Fixed bugs](#fixed-bugs)): limb-divergence streak chords;
+  streak guard killing legitimate fast trails at zoom (data-driven threshold); hollow typhoon
+  eye from Euler overshoot (`MAX_PARTICLE_STEP` 12 px); frozen overlay misaligned during
+  drag/zoom (live low-res preview); stale browser cache (`no-cache` data fetches); rim
+  sentinel pixels.
+- **Aesthetic parity with nullschool** (measured passes, see
+  [Aesthetic-parity pass](#aesthetic-parity-pass)): pastelized extended-sinebow overlay at
+  0.72 alpha, near-neutral luminous long-streamline trails, deep-indigo calm end (≈#070570),
+  political borders, dpr-crisp rendering.
+- **Four-canvas stack** — dedicated `#lines` canvas above the overlay so coastlines render
+  full-white and stay visible through the trails.
+- **Burger-menu HUD** — collapsed `☰ earth` bar; expandable panel with hierarchical
+  exclusive tabs (Atmosphere now; Ocean written but hidden until its pages are ready); the
+  color bar, data lines and readouts all moved inside. Page title simplified to "earth".
+- **Layer engine + pressure-level winds** — `LAYERS` registry, `loadLayer()`, `layerchange`
+  event, `#layer=<id>` hash; three new GFS layers (1000 hPa, 500 hPa, 10 hPa @ 06z) delivered
+  via `--no-ff` feature branches (`feature/wind-1000hpa`, `feature/wind-500hpa`,
+  `feature/wind-10hpa`) per the branching model above, each verified headlessly pre-merge.
+- **Repo hygiene** — `__pycache__` ignored; `?v=` cache-busting removed for simplicity;
+  README maintained as the cross-session handoff document; history pushed to GitHub
+  (main + the four work branches).
