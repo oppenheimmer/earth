@@ -675,7 +675,8 @@
     // matching button in index.html's menu); the menu dispatches a "layerchange"
     // event with the layer id.
     var LAYERS = {
-        "surface": {file: "data/current-wind-surface-level-gfs-0.25.json", label: "Wind @ Surface"}
+        "surface": {file: "data/current-wind-surface-level-gfs-0.25.json", label: "Wind @ Surface"},
+        "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"}
     };
     var DEFAULT_LAYER = "surface";
 
