@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>earth</title>
+    <meta name="description" content="Animated global wind visualization — a minimal replica of earth.nullschool.net's colorful wind mode">
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div id="display">
+        <canvas id="map"></canvas>
+        <canvas id="overlay"></canvas>
+        <canvas id="lines"></canvas>
+        <canvas id="animation"></canvas>
+    </div>
+
+    <div id="hud">
+        <div id="menu-panel" hidden>
+            <div id="tabs" role="tablist">
+                <button class="tab active" data-tab="atmosphere" role="tab">Atmosphere</button>
+                <!-- Uncomment when the Ocean pages are ready:
+                <button class="tab" data-tab="ocean" role="tab">Ocean</button>
+                -->
+            </div>
+            <div class="tab-body" data-tab="atmosphere">
+                <button class="layer active">Wind @ Surface</button>
+            </div>
+            <!-- Uncomment when the Ocean pages are ready:
+            <div class="tab-body" data-tab="ocean" hidden>
+                <button class="layer" disabled>Currents <span class="soon">soon</span></button>
+                <button class="layer" disabled>Temperature <span class="soon">soon</span></button>
+            </div>
+            -->
+
+            <p id="data-label">GFS 0.25&deg; &nbsp;|&nbsp; NCEP / US National Weather Service</p>
+            <p id="data-date">&nbsp;</p>
+            <p class="scale-row">
+                <canvas id="scale" width="240" height="10"></canvas>
+                <span class="scale-labels">0 &ndash; 360 km/h</span>
+            </p>
+            <p id="location">click a point for wind speed</p>
+            <p class="credit">
+                drag to rotate &middot; scroll to zoom &middot; engine adapted from
+                <a href="https://github.com/cambecc/earth" target="_blank" rel="noopener">cambecc/earth</a>
+            </p>
+        </div>
+        <div id="menu-bar">
+            <button id="burger" aria-label="Toggle menu" aria-expanded="false">&#9776;</button>
+            <h1>earth</h1>
+            <p id="status">&nbsp;</p>
+        </div>
+    </div>
+
+    <script src="libs/d3.v7.min.js"></script>
+    <script src="libs/topojson-client.min.js"></script>
+    <script src="js/menu.js"></script>
+    <script src="js/wind.js"></script>
+</body>
+</html>
