@@ -756,11 +756,13 @@
         "10hpa": {file: "data/current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
         "temperature": {file: SURFACE_WIND, label: "Temperature @ Surface", scalar: {
             file: "data/current-temp-surface-level-gfs-0.25.json",
-            // Reversed inferno (user preference): light yellow when warm, deepening through
-            // orange/red into purple at intense heat.
-            lut: colormapLut(function (t) { return d3.interpolateInferno(1 - t); }),
-            min: 233.15, max: 323.15,  // -40 – 50 °C
-            scaleLabel: "-40 &ndash; 50 &deg;C",
+            // YlOrRd (user preference): yellow for mild temperatures deepening continuously
+            // through orange into red at intense heat.
+            lut: colormapLut(d3.interpolateYlOrRd),
+            // 0 – 50 °C: mild temperatures land in the yellow band; sub-zero clamps to the
+            // lightest yellow. A -40 floor pushed everything visible into the red half.
+            min: 273.15, max: 323.15,
+            scaleLabel: "0 &ndash; 50 &deg;C",
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
         }},
         "rh": {file: SURFACE_WIND, label: "Rel. Humidity @ Surface", scalar: {
