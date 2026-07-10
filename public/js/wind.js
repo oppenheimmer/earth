@@ -756,7 +756,9 @@
         "10hpa": {file: "data/current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
         "temperature": {file: SURFACE_WIND, label: "Temperature @ Surface", scalar: {
             file: "data/current-temp-surface-level-gfs-0.25.json",
-            lut: colormapLut(d3.interpolateInferno),
+            // Reversed inferno (user preference): light yellow when warm, deepening through
+            // orange/red into purple at intense heat.
+            lut: colormapLut(function (t) { return d3.interpolateInferno(1 - t); }),
             min: 233.15, max: 323.15,  // -40 – 50 °C
             scaleLabel: "-40 &ndash; 50 &deg;C",
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
