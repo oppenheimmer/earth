@@ -12,7 +12,8 @@ Usage:
     ./gribenv/bin/python scripts/refresh_wind.py 500hpa              # a pressure level
     ./gribenv/bin/python scripts/refresh_wind.py 500hpa file.grib2   # convert a local GRIB2
 
-Levels: surface, 1000hpa, 500hpa, 10hpa (see LEVELS).
+Wind levels: surface, 1000hpa, 500hpa, 10hpa (see LEVELS — two records, u then v).
+Scalar overlays: temperature, rh, dew (see SCALARS — one record, 2 m above ground).
 
 Notes:
   - The `.anl` files do NOT expose 10 m winds through the filter CGI; use `f000`
@@ -55,6 +56,28 @@ LEVELS = {
               "surface1Value": 1000.0},
 }
 
+# Single-record scalar overlay products (all 2 m above ground). param: grib2json header
+# identity (wind.js's buildScalarGrid reads geometry only, but keep the metadata honest).
+SCALARS = {
+    "temperature": {"cgi": "lev_2_m_above_ground", "var": "var_TMP", "select": {"shortName": "2t"},
+                    "out": "current-temp-surface-level-gfs-0.25.json",
+                    "param": {"parameterCategory": 0, "parameterCategoryName": "Temperature",
+                              "parameterNumber": 0, "parameterNumberName": "Temperature",
+                              "parameterUnit": "K"}},
+    "rh": {"cgi": "lev_2_m_above_ground", "var": "var_RH", "select": {"shortName": "2r"},
+           "out": "current-rh-surface-level-gfs-0.25.json",
+           "param": {"parameterCategory": 1, "parameterCategoryName": "Moisture",
+                     "parameterNumber": 1, "parameterNumberName": "Relative_humidity",
+                     "parameterUnit": "%"}},
+    "dew": {"cgi": "lev_2_m_above_ground", "var": "var_DPT", "select": {"shortName": "2d"},
+            "out": "current-dewpoint-surface-level-gfs-0.25.json",
+            "param": {"parameterCategory": 0, "parameterCategoryName": "Temperature",
+                      "parameterNumber": 6, "parameterNumberName": "Dew_point_temperature",
+                      "parameterUnit": "K"}},
+}
+WIND_PARAM = {"parameterCategory": 2, "parameterCategoryName": "Momentum",
+              "parameterUnit": "m.s-1"}
+
 
 def candidate_cycles(now=None, count=8):
     """Yield (yyyymmdd, hh) for recent GFS cycles, newest first."""
@@ -67,10 +90,12 @@ def candidate_cycles(now=None, count=8):
         yield c.strftime("%Y%m%d"), "%02d" % c.hour
 
 
-def fetch_cycle(ymd, hh, dest, lev_param):
+def fetch_cycle(ymd, hh, dest, lev_param, var_params):
     url = (BASE + "?file=gfs.t{hh}z.pgrb2.0p25.f000"
-           "&{lev}=on&var_UGRD=on&var_VGRD=on"
-           "&dir=%2Fgfs.{ymd}%2F{hh}%2Fatmos").format(ymd=ymd, hh=hh, lev=lev_param)
+           "&{lev}=on&{vars}"
+           "&dir=%2Fgfs.{ymd}%2F{hh}%2Fatmos").format(
+               ymd=ymd, hh=hh, lev=lev_param,
+               vars="&".join(v + "=on" for v in var_params))
     try:
         with urllib.request.urlopen(url, timeout=90) as r:
             data = r.read()
@@ -86,7 +111,7 @@ def fetch_cycle(ymd, hh, dest, lev_param):
     return True
 
 
-def record(grb, parameter_number, level):
+def record(grb, param, surface):
     lats, _ = grb.latlons()
     values = grb.values
     if lats[0, 0] < lats[-1, 0]:  # ensure scan mode 0: north -> south
@@ -97,49 +122,58 @@ def record(grb, parameter_number, level):
     ref = datetime(grb.year, grb.month, grb.day, grb.hour, tzinfo=timezone.utc)
     flat = [None if (isinstance(v, float) and math.isnan(v)) else round(float(v), 1)
             for v in values.flatten()]
-    return {
-        "header": {
-            "discipline": 0, "disciplineName": "Meteorological products",
-            "refTime": ref.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "parameterCategory": 2, "parameterCategoryName": "Momentum",
-            "parameterNumber": parameter_number,
-            "parameterNumberName": "U-component_of_wind" if parameter_number == 2 else "V-component_of_wind",
-            "parameterUnit": "m.s-1",
-            "forecastTime": int(grb.forecastTime),
-            "surface1Type": level["surface1Type"], "surface1TypeName": level["surface1TypeName"],
-            "surface1Value": level["surface1Value"],
-            "gridDefinitionTemplate": 0, "numberPoints": ni * nj, "shape": 6,
-            "scanMode": 0, "nx": ni, "ny": nj,
-            "lo1": 0.0, "la1": 90.0, "lo2": 360.0 - dx, "la2": -90.0, "dx": dx, "dy": dy,
-        },
-        "data": flat,
+    header = {
+        "discipline": 0, "disciplineName": "Meteorological products",
+        "refTime": ref.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "forecastTime": int(grb.forecastTime),
+        "surface1Type": surface["surface1Type"], "surface1TypeName": surface["surface1TypeName"],
+        "surface1Value": surface["surface1Value"],
+        "gridDefinitionTemplate": 0, "numberPoints": ni * nj, "shape": 6,
+        "scanMode": 0, "nx": ni, "ny": nj,
+        "lo1": 0.0, "la1": 90.0, "lo2": 360.0 - dx, "la2": -90.0, "dx": dx, "dy": dy,
     }
+    header.update(param)
+    return {"header": header, "data": flat}
+
+
+SURFACE_2M = {"surface1Type": 103, "surface1TypeName": "Specified height level above ground",
+              "surface1Value": 2.0}
 
 
 def main():
     args = sys.argv[1:]
-    level_name = args.pop(0) if args and args[0] in LEVELS else "surface"
-    level = LEVELS[level_name]
+    name = args.pop(0) if args and args[0] in (LEVELS.keys() | SCALARS.keys()) else "surface"
+    product = LEVELS.get(name) or SCALARS[name]
+    is_wind = name in LEVELS
     grib_path = args.pop(0) if args else None
     if grib_path:
         print("using local GRIB file: " + grib_path)
     else:
-        grib_path = os.path.join(tempfile.gettempdir(), "gfs_0p25_f000_%s.grib2" % level_name)
-        print("searching NOMADS for the newest published GFS cycle (%s)…" % level_name)
+        grib_path = os.path.join(tempfile.gettempdir(), "gfs_0p25_f000_%s.grib2" % name)
+        print("searching NOMADS for the newest published GFS cycle (%s)…" % name)
+        var_params = ["var_UGRD", "var_VGRD"] if is_wind else [product["var"]]
         for ymd, hh in candidate_cycles():
-            if fetch_cycle(ymd, hh, grib_path, level["cgi"]):
+            if fetch_cycle(ymd, hh, grib_path, product["cgi"], var_params):
                 break
         else:
             sys.exit("no GFS cycle available — NOMADS unreachable or lagging")
 
     grbs = pygrib.open(grib_path)
-    u_select = dict(level["select"])
-    v_select = dict(u_select, shortName=u_select["shortName"].replace("u", "v"))
-    u = grbs.select(**u_select)[0]
-    v = grbs.select(**v_select)[0]
-    out = [record(u, 2, level), record(v, 3, level)]
+    if is_wind:
+        surface = {k: product[k] for k in ("surface1Type", "surface1TypeName", "surface1Value")}
+        u_select = dict(product["select"])
+        v_select = dict(u_select, shortName=u_select["shortName"].replace("u", "v"))
+        u = grbs.select(**u_select)[0]
+        v = grbs.select(**v_select)[0]
+        out = [record(u, dict(WIND_PARAM, parameterNumber=2,
+                              parameterNumberName="U-component_of_wind"), surface),
+               record(v, dict(WIND_PARAM, parameterNumber=3,
+                              parameterNumberName="V-component_of_wind"), surface)]
+    else:
+        grb = grbs.select(**product["select"])[0]
+        out = [record(grb, product["param"], SURFACE_2M)]
 
-    out_path = os.path.abspath(os.path.join(DATA_DIR, level["out"]))
+    out_path = os.path.abspath(os.path.join(DATA_DIR, product["out"]))
     with open(out_path, "w") as f:
         json.dump(out, f, separators=(",", ":"))
     h = out[0]["header"]
