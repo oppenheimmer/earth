@@ -136,10 +136,12 @@ Three **scalar overlay datasets** (added 2026-07-10, same 06z cycle) drive the c
 layers: 2 m TMP / RH / DPT as single-record grib2json files
 (`current-{temp,rh,dewpoint}-surface-level-gfs-0.25.json`). A combined layer pairs surface
 wind (particle trails) with a scalar field colored through a d3-scale-chromatic colormap LUT
-(the vendored D3 bundle ships them): **Temperature → YlOrRd (273.15–323.15 K — yellow mild,
-red intense; first inferno, then reversed inferno, both superseded by user preference; the
-0 °C floor matters — a -40 floor pushed everything visible into red), Relative humidity →
-Purples (0–100 %), Dew point → PuBuGn (233.15–308.15 K)**. The scale bar and the
+(the vendored D3 bundle ships them, except bwr — hand-rolled two-segment ramp):
+**Temperature → matplotlib 'bwr' diverging (223.15–323.15 K, symmetric so the white point
+sits exactly on 0 °C: blue frozen, white freezing, red heat), Relative humidity → BuPu
+(0–100 %), Dew point → PuBuGn (233.15–308.15 K)**. Colormap history (all user-directed,
+same day): temperature inferno → reversed inferno → YlOrRd (0–50 °C floor — a -40 floor
+pushed everything visible into red) → bwr; RH Purples → BuPu for contrast. The scale bar and the
 click readout follow the active layer (`overlaySpec.format`; scalar value · wind speed).
 
 To refresh (preferred path, verified working — no Java needed):

@@ -748,6 +748,12 @@
     // event with the layer id. `file` is the wind dataset that drives the particles;
     // an optional `scalar` spec colors the overlay from a second dataset instead of
     // wind speed: {file, lut, min, max, scaleLabel, format}.
+    /** matplotlib's 'bwr' diverging colormap: pure blue → white → pure red, linear in RGB. */
+    function bwrInterpolator(t) {
+        var c = Math.round(t < 0.5 ? 510 * t : 510 * (1 - t));
+        return t < 0.5 ? "rgb(" + c + "," + c + ",255)" : "rgb(255," + c + "," + c + ")";
+    }
+
     var SURFACE_WIND = "data/current-wind-surface-level-gfs-0.25.json";
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
@@ -756,18 +762,16 @@
         "10hpa": {file: "data/current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
         "temperature": {file: SURFACE_WIND, label: "Temperature @ Surface", scalar: {
             file: "data/current-temp-surface-level-gfs-0.25.json",
-            // YlOrRd (user preference): yellow for mild temperatures deepening continuously
-            // through orange into red at intense heat.
-            lut: colormapLut(d3.interpolateYlOrRd),
-            // 0 – 50 °C: mild temperatures land in the yellow band; sub-zero clamps to the
-            // lightest yellow. A -40 floor pushed everything visible into the red half.
-            min: 273.15, max: 323.15,
-            scaleLabel: "0 &ndash; 50 &deg;C",
+            // bwr diverging (user preference): blue below freezing, white at 0 °C, red heat.
+            // Symmetric domain keeps the white point exactly on 0 °C.
+            lut: colormapLut(bwrInterpolator),
+            min: 223.15, max: 323.15,  // -50 – 50 °C
+            scaleLabel: "-50 &ndash; 50 &deg;C",
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
         }},
         "rh": {file: SURFACE_WIND, label: "Rel. Humidity @ Surface", scalar: {
             file: "data/current-rh-surface-level-gfs-0.25.json",
-            lut: colormapLut(d3.interpolatePurples),
+            lut: colormapLut(d3.interpolateBuPu),  // Purples → BuPu for better contrast (user preference)
             min: 0, max: 100,
             scaleLabel: "0 &ndash; 100 %",
             format: function (v) { return v.toFixed(0) + " %"; }
