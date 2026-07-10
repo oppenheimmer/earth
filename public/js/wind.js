@@ -767,6 +767,13 @@
             min: 0, max: 100,
             scaleLabel: "0 &ndash; 100 %",
             format: function (v) { return v.toFixed(0) + " %"; }
+        }},
+        "dew": {file: SURFACE_WIND, label: "Dew Point @ Surface", scalar: {
+            file: "data/current-dewpoint-surface-level-gfs-0.25.json",
+            lut: colormapLut(d3.interpolatePuBuGn),
+            min: 233.15, max: 308.15,  // -40 – 35 °C
+            scaleLabel: "-40 &ndash; 35 &deg;C",
+            format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
         }}
     };
     var DEFAULT_LAYER = "surface";
