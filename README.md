@@ -292,11 +292,45 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
 
 ## Next steps
 
-   - **Ocean layers**: build real "Currents" and "Temperature" pages (e.g., OSCAR currents /
-     RTGS SST), then uncomment the Ocean tab blocks in `index.html`. The layer-switching
-     plumbing now exists (`LAYERS` registry + `loadLayer()` + `layerchange` event, built for
-     the pressure-level wind layers) — ocean layers mainly need their data pipelines and,
-     for temperature, a scalar-overlay render mode (no particles).
+   - **Ocean layers — IN PROGRESS, paused 2026-07-10 (battery)**. User wants two feature
+     branches (`feature/ocean-currents`, `feature/ocean-temperature`), land left uncolored,
+     Ocean tab stacked **vertically below** ATMOSPHERE in the burger menu, rendering to
+     resemble `../Ocean.png` (nullschool currents: land dark/uncolored, ocean deep blue →
+     green → yellow → red by current speed; that's cambecc's segmented currents palette,
+     stops 0:(10,25,68) 0.15:(10,25,250) 0.4:(24,255,93) 0.65:(255,233,102) 1.0:(255,233,15)
+     1.5:(255,15,15), domain 0–1.5 m/s). **Data source per user: CMEMS Global Ocean Physics
+     Analysis & Forecast (nullschool's source; waves would be WAVEWATCH III/NOMADS).**
+     Findings, all verified working today:
+       - NOMADS has NO grib filter for RTOFS; RTOFS 2ds is now netCDF-only (149–185 MB,
+         curvilinear) — rejected. NOMADS OPeNDAP is retired (SCN 25-81). NOMADS pub dir
+         listings need `curl --http1.1` (malformed content-length breaks HTTP/2).
+       - **CMEMS ARCO zarr is anonymously readable** (no login, unlike the toolbox):
+         STAC catalog `https://stac.marine.copernicus.eu/metadata/
+         GLOBAL_ANALYSISFORECAST_PHY_001_024/product.stac.json` → per-dataset
+         `dataset.stac.json` → asset `downsampled4` =
+         `https://s3.waw3-1.cloudferro.com/mdl-arco-time-007/arco/
+         GLOBAL_ANALYSISFORECAST_PHY_001_024/cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m_202406/
+         downsampled4.zarr` (⅓° effective — right size for the engine). Currents dataset:
+         `...phy-cur...P1D-m` vars uo/vo (m/s, float32, no scale/offset, valid ±5); ocean
+         temperature: `...phy-thetao...P1D-m` (thetao, °C). Shapes (1510 time, 50 elevation,
+         511 lat, 1080 lon), chunks (1,1,511,1080) = **one HTTP GET per field** at
+         `uo/{t}.0.{lat_chunk}.{lon_chunk}` (here `{t}.0.0.0`); blosc-lz4-shuffle compressed
+         (pip `numcodecs`); time = hours since 1950-01-01 (pick last index ≤ now = analysis
+         day); depth index 0 = 0.494 m surface; lat 511 @ ⅓° (check order, flip north-first
+         for scan mode 0), lon 1080 from -180.
+       - Plan: `scripts/refresh_ocean.py` (urllib + numcodecs blosc + numpy; no pygrib)
+         emitting the same grib2json format; currents = 2-record u/v file (particles + speed
+         overlay via a `fromMagnitude` overlaySpec, segmented palette above); ocean temp =
+         thetao scalar (Turbo, ≈-2–32 °C) with the currents file driving particles. Engine
+         needs per-layer `speedFactor` (~10–15× — currents are ~50× slower than wind; also
+         scale the streak guard!) and `maxIntensity` (~1 m/s), plus per-layer `#data-label`
+         source line ("CMEMS Global Ocean Physics"). Land uncolored + no particles on land
+         come free: CMEMS land = NaN → interpolate() returns null.
+       - NB the pygrib/PIL/numcodecs venv lives in the session scratchpad under /tmp —
+         likely wiped by reboot; recreate with `python3 -m venv gribenv && pip install
+         pygrib pillow numpy numcodecs`.
+   - **Ocean tab markup** is still commented out in `index.html` (two marked blocks); menu
+     tabs need `#tabs {flex-direction: column}` for the vertical stacking.
    - Automate data refresh (e.g., a GitHub Action running `scripts/refresh_wind.py` every 6 h
      and redeploying) — otherwise the deployed snapshot goes stale from deploy day.
    - Touch pinch-zoom (only wheel zoom is implemented). A read-only URL-hash initial view
