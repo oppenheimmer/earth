@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Refresh public/data/current-wind-surface-level-gfs-0.25.json from the latest NOAA GFS run.
+Refresh a wind dataset in public/data/ from the latest NOAA GFS run.
 
-Downloads 10 m above-ground UGRD/VGRD from the NOMADS grib filter (0.25° grid) and writes
-them in grib2json-compatible format (the subset of header fields js/wind.js reads).
+Downloads UGRD/VGRD at the requested level from the NOMADS grib filter (0.25° grid) and
+writes them in grib2json-compatible format (the subset of header fields js/wind.js reads).
 No Java/grib2json needed — decoding is done with pygrib.
 
 Usage:
     python3 -m venv gribenv && ./gribenv/bin/pip install pygrib
-    ./gribenv/bin/python scripts/refresh_wind.py            # auto-download newest cycle
-    ./gribenv/bin/python scripts/refresh_wind.py file.grib2 # convert a local GRIB2 file
+    ./gribenv/bin/python scripts/refresh_wind.py                     # surface (10 m) wind
+    ./gribenv/bin/python scripts/refresh_wind.py 500hpa              # a pressure level
+    ./gribenv/bin/python scripts/refresh_wind.py 500hpa file.grib2   # convert a local GRIB2
+
+Levels: surface, 1000hpa, 500hpa, 10hpa (see LEVELS).
 
 Notes:
   - The `.anl` files do NOT expose 10 m winds through the filter CGI; use `f000`
@@ -28,8 +31,29 @@ from datetime import datetime, timedelta, timezone
 import pygrib
 
 BASE = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
-OUT = os.path.join(os.path.dirname(__file__), "..", "public", "data",
-                   "current-wind-surface-level-gfs-0.25.json")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "data")
+
+# cgi: NOMADS filter level parameter; select: pygrib selector for the u record (the v
+# record swaps shortName); surface1*: grib2json header values (informational — wind.js
+# picks records by parameterCategory/Number only).
+LEVELS = {
+    "surface": {"cgi": "lev_10_m_above_ground", "select": {"shortName": "10u"},
+                "out": "current-wind-surface-level-gfs-0.25.json",
+                "surface1Type": 103, "surface1TypeName": "Specified height level above ground",
+                "surface1Value": 10.0},
+    "1000hpa": {"cgi": "lev_1000_mb", "select": {"shortName": "u", "level": 1000},
+                "out": "current-wind-1000hpa-gfs-0.25.json",
+                "surface1Type": 100, "surface1TypeName": "Isobaric surface",
+                "surface1Value": 100000.0},
+    "500hpa": {"cgi": "lev_500_mb", "select": {"shortName": "u", "level": 500},
+               "out": "current-wind-500hpa-gfs-0.25.json",
+               "surface1Type": 100, "surface1TypeName": "Isobaric surface",
+               "surface1Value": 50000.0},
+    "10hpa": {"cgi": "lev_10_mb", "select": {"shortName": "u", "level": 10},
+              "out": "current-wind-10hpa-gfs-0.25.json",
+              "surface1Type": 100, "surface1TypeName": "Isobaric surface",
+              "surface1Value": 1000.0},
+}
 
 
 def candidate_cycles(now=None, count=8):
@@ -43,10 +67,10 @@ def candidate_cycles(now=None, count=8):
         yield c.strftime("%Y%m%d"), "%02d" % c.hour
 
 
-def fetch_cycle(ymd, hh, dest):
+def fetch_cycle(ymd, hh, dest, lev_param):
     url = (BASE + "?file=gfs.t{hh}z.pgrb2.0p25.f000"
-           "&lev_10_m_above_ground=on&var_UGRD=on&var_VGRD=on"
-           "&dir=%2Fgfs.{ymd}%2F{hh}%2Fatmos").format(ymd=ymd, hh=hh)
+           "&{lev}=on&var_UGRD=on&var_VGRD=on"
+           "&dir=%2Fgfs.{ymd}%2F{hh}%2Fatmos").format(ymd=ymd, hh=hh, lev=lev_param)
     try:
         with urllib.request.urlopen(url, timeout=90) as r:
             data = r.read()
@@ -62,7 +86,7 @@ def fetch_cycle(ymd, hh, dest):
     return True
 
 
-def record(grb, parameter_number):
+def record(grb, parameter_number, level):
     lats, _ = grb.latlons()
     values = grb.values
     if lats[0, 0] < lats[-1, 0]:  # ensure scan mode 0: north -> south
@@ -82,8 +106,8 @@ def record(grb, parameter_number):
             "parameterNumberName": "U-component_of_wind" if parameter_number == 2 else "V-component_of_wind",
             "parameterUnit": "m.s-1",
             "forecastTime": int(grb.forecastTime),
-            "surface1Type": 103, "surface1TypeName": "Specified height level above ground",
-            "surface1Value": 10.0,
+            "surface1Type": level["surface1Type"], "surface1TypeName": level["surface1TypeName"],
+            "surface1Value": level["surface1Value"],
             "gridDefinitionTemplate": 0, "numberPoints": ni * nj, "shape": 6,
             "scanMode": 0, "nx": ni, "ny": nj,
             "lo1": 0.0, "la1": 90.0, "lo2": 360.0 - dx, "la2": -90.0, "dx": dx, "dy": dy,
@@ -93,24 +117,29 @@ def record(grb, parameter_number):
 
 
 def main():
-    grib_path = sys.argv[1] if len(sys.argv) > 1 else None
+    args = sys.argv[1:]
+    level_name = args.pop(0) if args and args[0] in LEVELS else "surface"
+    level = LEVELS[level_name]
+    grib_path = args.pop(0) if args else None
     if grib_path:
         print("using local GRIB file: " + grib_path)
     else:
-        grib_path = os.path.join(tempfile.gettempdir(), "gfs_0p25_f000.grib2")
-        print("searching NOMADS for the newest published GFS cycle…")
+        grib_path = os.path.join(tempfile.gettempdir(), "gfs_0p25_f000_%s.grib2" % level_name)
+        print("searching NOMADS for the newest published GFS cycle (%s)…" % level_name)
         for ymd, hh in candidate_cycles():
-            if fetch_cycle(ymd, hh, grib_path):
+            if fetch_cycle(ymd, hh, grib_path, level["cgi"]):
                 break
         else:
             sys.exit("no GFS cycle available — NOMADS unreachable or lagging")
 
     grbs = pygrib.open(grib_path)
-    u = grbs.select(shortName="10u")[0]
-    v = grbs.select(shortName="10v")[0]
-    out = [record(u, 2), record(v, 3)]
+    u_select = dict(level["select"])
+    v_select = dict(u_select, shortName=u_select["shortName"].replace("u", "v"))
+    u = grbs.select(**u_select)[0]
+    v = grbs.select(**v_select)[0]
+    out = [record(u, 2, level), record(v, 3, level)]
 
-    out_path = os.path.abspath(OUT)
+    out_path = os.path.abspath(os.path.join(DATA_DIR, level["out"]))
     with open(out_path, "w") as f:
         json.dump(out, f, separators=(",", ":"))
     h = out[0]["header"]

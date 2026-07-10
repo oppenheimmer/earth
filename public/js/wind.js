@@ -671,6 +671,14 @@
     // ------------------------------------------------------------------------------------------------
     // Orchestration: interaction, cancellation, recompute
 
+    // One layer is displayed at a time. Feature branches add entries here (and a
+    // matching button in index.html's menu); the menu dispatches a "layerchange"
+    // event with the layer id.
+    var LAYERS = {
+        "surface": {file: "data/current-wind-surface-level-gfs-0.25.json", label: "Wind @ Surface"}
+    };
+    var DEFAULT_LAYER = "surface";
+
     var currentCancel = {requested: false};
     var recomputeTimer = null;
     var grid = null;
@@ -709,6 +717,37 @@
             animate(field, cancel);
         });
     }
+
+    /**
+     * Fetch a layer's wind dataset and restart the pipeline on it. The map topology is
+     * loaded once in init(); switching layers only swaps the grid.
+     */
+    function loadLayer(id) {
+        var layer = LAYERS[id];
+        if (!layer) return;
+        cancelWork();
+        clearTimeout(recomputeTimer);
+        clearCanvas(animCanvas);
+        document.querySelectorAll(".layer[data-layer]").forEach(function (b) {
+            b.classList.toggle("active", b.dataset.layer === id);
+        });
+        setStatus("downloading data…");
+        fetch(layer.file, {cache: "no-cache"}).then(function (r) {
+            if (!r.ok) throw new Error("wind data: HTTP " + r.status);
+            return r.json();
+        }).then(function (windData) {
+            grid = buildGrid(windData);
+            document.getElementById("data-date").textContent = "Data: GFS analysis, " + formatDate(grid.date);
+            recompute();
+        }).catch(function (err) {
+            console.error(err);
+            setStatus("error: " + err.message);
+        });
+    }
+
+    document.addEventListener("layerchange", function (e) {
+        loadLayer(e.detail);
+    });
 
     function attachInteraction() {
         var display = d3.select("#display");
@@ -801,14 +840,15 @@
         attachInteraction();
         setStatus("downloading data…");
 
+        // Optional initial layer via URL hash, e.g. #layer=surface (also the headless-
+        // testing hook for verifying non-default layers, since the menu needs a click).
+        var layerId = hash.get("layer");
+        if (!LAYERS[layerId]) layerId = DEFAULT_LAYER;
+
         Promise.all([
             // "no-cache" = always revalidate with the server (cheap 304 when unchanged),
-            // so a refreshed wind snapshot shows up on plain reload instead of being
-            // served stale from the browser's heuristic cache.
-            fetch("data/current-wind-surface-level-gfs-0.25.json", {cache: "no-cache"}).then(function (r) {
-                if (!r.ok) throw new Error("wind data: HTTP " + r.status);
-                return r.json();
-            }),
+            // so a refreshed topology shows up on plain reload instead of being served
+            // stale from the browser's heuristic cache. Wind data loads via loadLayer().
             fetch("data/earth-topo.json", {cache: "no-cache"}).then(function (r) {
                 if (!r.ok) throw new Error("topology: HTTP " + r.status);
                 return r.json();
@@ -822,8 +862,7 @@
                 return r.json();
             })
         ]).then(function (results) {
-            var windData = results[0], topo = results[1], c50 = results[2], c110 = results[3];
-            grid = buildGrid(windData);
+            var topo = results[0], c50 = results[1], c110 = results[2];
             mesh = {
                 coastHi: topojson.feature(topo, topo.objects.coastline_50m),
                 coastLo: topojson.feature(topo, topo.objects.coastline_110m),
@@ -833,9 +872,8 @@
                 bordersHi: topojson.mesh(c50, c50.objects.countries, function (a, b) { return a !== b; }),
                 bordersLo: topojson.mesh(c110, c110.objects.countries, function (a, b) { return a !== b; })
             };
-            document.getElementById("data-date").textContent = "Data: GFS analysis, " + formatDate(grid.date);
             drawMap(false);
-            recompute();
+            loadLayer(layerId);
         }).catch(function (err) {
             console.error(err);
             setStatus("error: " + err.message);
