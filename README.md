@@ -20,7 +20,8 @@ A minimal replica of the meteorological visualization from
 ├── start.sh                     # local launcher: serves public/ on :8420 and opens browser
 ├── scripts/
 │   ├── refresh_wind.py          # GFS data refresh, pygrib-based (verified working)
-│   └── refresh_ocean.py         # CMEMS ocean-current refresh via copernicusmarine toolbox (creds: .env/)
+│   ├── refresh_ocean.py         # CMEMS ocean-current refresh via copernicusmarine toolbox (creds: .env/)
+│   └── refresh_waves.py         # GFS-Wave (WAVEWATCH III) waves refresh via NOMADS, anonymous
 └── public/                      # the entire deployable site
     ├── index.html               # four stacked canvases (#map, #overlay, #lines, #animation) + burger-menu HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
@@ -40,6 +41,8 @@ A minimal replica of the meteorological visualization from
         ├── current-ocean-currents-cmems-0.25.json    # CMEMS current u/v @ 0.494 m, ¼°, daily mean (~11 MB)
         ├── current-ocean-currents-25m-cmems-0.25.json   # CMEMS current u/v @ 25.211 m (~11 MB)
         ├── current-ocean-temp-cmems-0.25.json        # CMEMS sea water temperature (thetao, °C), ¼° (~6 MB)
+        ├── current-ocean-waves-gfswave-0.25.json     # GFS-Wave propagation u/v, |v| = peak period s (~10 MB)
+        ├── current-ocean-wave-height-gfswave-0.25.json  # GFS-Wave significant wave height, m (~5 MB)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
@@ -193,6 +196,27 @@ the first pass at ⅓° + 5×5 still left single-cell nubs on convoluted coasts)
 1062 … 5727.9 m); we render the shallowest (0.494 m). Deeper layers only need
 `minimum_depth`/`maximum_depth` changed in `fetch()` plus a LAYERS entry.
 
+The **wave layers** (`feature/OceanWaves`, 2026-07-12) come from **GFS-Wave** — the
+WAVEWATCH III model coupled into GFS (nullschool's credited source for its waves modes) —
+via the same anonymous NOMADS filter CGI as the atmosphere (`filter_gfswave.pl`, file
+`gfswave.t{hh}z.global.0p25.f000.grib2`, **no login needed**), through
+`scripts/refresh_waves.py` (same newest-cycle walk-back as `refresh_wind.py`). One download
+of HTSGW + PERPW + DIRPW yields two files: `current-ocean-waves-gfswave-0.25.json` holds u/v
+**propagation vectors whose magnitude is the peak period in seconds** (DIRPW is the
+meteorological "direction from" — verified against the Southern Ocean westerlies, median
+265° — so propagation = from + 180°); the period overlay is then just `fromMagnitude` and
+the click readout speaks seconds, no third file. `current-ocean-wave-height-gfswave-0.25.json`
+is the HTSGW scalar. Both fields get a 5×5 NaN-dilation pass at native 0.25° (the wave
+model's land mask is a cell fatter than the vector coastline — same staircase bug as CMEMS,
+same cure). Two layers share the flow file: **Wave-Height** (`waves`) colors by significant
+wave height through a segmented navy → steel → teal → sand → orange/red palette (0–15 m,
+matched against the user's nullschool reference), **Wave-Period** (`wavep`) through
+d3.interpolateTurbo (0–25 s). The particles render as nullschool's short chunky **crest
+dashes**, not streamlines: `particleOpts` grew per-layer `maxAge` (14 vs default 100) and
+`fade` (0.75 vs 0.97) so only the last few segments survive, with sparse thick strokes
+(multiplier 1.5, width 2.9, velocityScale 1/12000, intensity saturating at 22 s — long swell
+marches faster and brighter).
+
 **CMEMS credentials**: `scripts/refresh_ocean.py` needs a Copernicus Marine account. The
 toolbox reads `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD` —
 locally these live in the git-ignored `.env/copernicusmarine` (run
@@ -336,7 +360,8 @@ status line; page/HUD title is plain "earth", per user request). The burger butt
      hook, since the menu needs a click). Since 2026-07-12 the domains **stack vertically**
      (`#tabs` is a column; each tab header sits directly above its own `.tab-body`): the
      **Ocean tab** below Atmosphere holds **Current-Surface** (`data-layer="ocean"`),
-     **Current-25m** (`data-layer="ocean25"`) and **Temperature** (`data-layer="sst"`),
+     **Current-25m** (`data-layer="ocean25"`), **Temperature** (`data-layer="sst"`),
+     **Wave-Height** (`data-layer="waves"`) and **Wave-Period** (`data-layer="wavep"`),
      all live.
    - Data source + snapshot date lines, the color-scale bar, the click-for-wind-speed
      readout, and credits — all IDs (`#scale`, `#data-date`, `#location`, `#status`)
@@ -373,7 +398,8 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
    - NB the venv (pygrib/PIL/numpy/copernicusmarine) lives in the session scratchpad under
      /tmp — likely wiped by reboot; recreate with `python3 -m venv gribenv && ./gribenv/bin/pip
      install pygrib pillow numpy copernicusmarine`.
-   - Automate data refresh (e.g., a GitHub Action running `scripts/refresh_wind.py` every 6 h
+   - Automate data refresh (e.g., a GitHub Action running `scripts/refresh_wind.py` +
+     `refresh_waves.py` (anonymous) and `refresh_ocean.py` (CMEMS secrets) every 6 h
      and redeploying) — otherwise the deployed snapshot goes stale from deploy day.
    - Touch pinch-zoom (only wheel zoom is implemented). A read-only URL-hash initial view
      already exists (`#rotate=λ,φ&zoom=k`, e.g. `#rotate=-128.5,-21.5&zoom=5` centers the
@@ -413,6 +439,21 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `feature/OceanWaves`:
+
+- **Wave layers** (`waves` / `wavep`) — GFS-Wave (WAVEWATCH III / NCEP / NWS, nullschool's
+  source) significant wave height + peak wave period, via the anonymous NOMADS filter —
+  **no login required** (checked before building; the user asked for no workarounds if one
+  was). New `scripts/refresh_waves.py`; one flow file carries propagation u/v with
+  |v| = period (s), so the period overlay is `fromMagnitude` and the readout speaks seconds.
+- **Crest-dash particle style** — per-layer `maxAge` and `fade` in `particleOpts`: the wave
+  layers draw short, sparse, thick dashes marching in the propagation direction (nullschool's
+  waves look) instead of long streamlines; tuned against the user's reference screenshot
+  (multiplier 2.2→1.5, maxAge 18→14, fade 0.80→0.75, width 2.6→2.9 after first render).
+- **Coastal NaN-dilation** (5×5) in the wave converter — the wave model's land mask is a
+  cell fatter than the vector coastline; pre-empts the charcoal-staircase bug the CMEMS
+  layers hit. Atmosphere surface-wind layer regression-checked after the `animate()` change.
 
 2026-07-12, on `main` (post-merge tuning, second round):
 

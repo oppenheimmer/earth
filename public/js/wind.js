@@ -648,6 +648,9 @@
         var colorStyles = windIntensityColorScale(INTENSITY_SCALE_STEP, particleOpts.maxIntensity);
         var buckets = colorStyles.map(function () { return []; });
         var dpr = window.devicePixelRatio || 1;
+        // Trail shape is a per-layer choice: long fluid streamlines (winds, currents) vs
+        // the wave layers' short crest dashes (small maxAge + fast fade).
+        var maxAge = particleOpts.maxAge || MAX_PARTICLE_AGE;
         // Scale count with dpr (capped) so thinner device-px trails keep the same visual density.
         var particleCount = Math.round(bounds.width * (particleOpts.multiplier || PARTICLE_MULTIPLIER) *
             Math.min(dpr, 2));
@@ -666,13 +669,13 @@
 
         var particles = [];
         for (var i = 0; i < particleCount; i++) {
-            particles.push(field.randomize({age: Math.floor(Math.random() * MAX_PARTICLE_AGE)}));
+            particles.push(field.randomize({age: Math.floor(Math.random() * maxAge)}));
         }
 
         function evolve() {
             buckets.forEach(function (bucket) { bucket.length = 0; });
             particles.forEach(function (particle) {
-                if (particle.age > MAX_PARTICLE_AGE) {
+                if (particle.age > maxAge) {
                     field.randomize(particle).age = 0;
                 }
                 var x = particle.x;
@@ -680,7 +683,7 @@
                 var v = field(x, y);  // vector at current position
                 var m = v[2];
                 if (m === null) {
-                    particle.age = MAX_PARTICLE_AGE;  // particle has escaped the grid, never to return
+                    particle.age = maxAge;  // particle has escaped the grid, never to return
                 }
                 else {
                     var xt = x + v[0];
@@ -689,7 +692,7 @@
                         // The projection's finite-difference distortion diverges at the globe's
                         // limb, producing screen vectors hundreds of px long; drawing one paints
                         // a straight streak across the disc. Respawn the particle instead.
-                        particle.age = MAX_PARTICLE_AGE;
+                        particle.age = maxAge;
                     }
                     else if (field.isDefined(xt, yt)) {
                         particle.xt = xt;
@@ -709,7 +712,9 @@
         var g = animCtx;
         // The layer's line width in device px regardless of screen density.
         g.lineWidth = (particleOpts.lineWidth || PARTICLE_LINE_WIDTH) / dpr;
-        g.fillStyle = "rgba(0, 0, 0, 0.97)";  // per-frame trail fade: slow → long fluid streamlines
+        // Per-frame trail fade: 0.97 → long fluid streamlines; the wave layers drop it so
+        // only the last few segments survive — a short dash, not a streak.
+        g.fillStyle = "rgba(0, 0, 0, " + (particleOpts.fade || 0.97) + ")";
 
         function draw() {
             // Fade existing particle trails.
@@ -839,6 +844,20 @@
         scaleLabel: "0 &ndash; 1.5 m/s",
         format: metersPerSecond
     };
+    // Waves: GFS-Wave (WAVEWATCH III) via the same NOMADS filter as the atmosphere layers.
+    // One flow file drives both wave layers; its vectors point in the propagation direction
+    // and their magnitude is the PEAK PERIOD IN SECONDS — so the period overlay is just
+    // fromMagnitude, and the click readout speaks seconds.
+    var WAVE_FLOW = "data/current-ocean-waves-gfswave-0.25.json";
+    var WAVE_CREDIT = "GFS-Wave 0.25&deg; &nbsp;|&nbsp; WAVEWATCH III / NCEP / NWS";
+    var WAVE_DATE_LABEL = "Data: GFS-Wave (WW3), ";
+    function seconds(v) { return v.toFixed(1) + " s"; }
+    // Short chunky crest dashes marching in the propagation direction (nullschool's waves
+    // look), not streamlines: small maxAge + fast fade keep only the last few segments on
+    // screen. Magnitudes are periods (~5–20 s), so velocityScale is between the wind and
+    // current scales; long swell marches faster and brighter than short chop.
+    var WAVE_PARTICLES = {velocityScale: 1 / 12000, maxIntensity: 22, multiplier: 1.5,
+        lineWidth: 2.9, maxAge: 14, fade: 0.75};
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
         "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
@@ -895,6 +914,43 @@
                 min: 0, max: 35,
                 scaleLabel: "0 &ndash; 35 &deg;C",
                 format: function (v) { return v.toFixed(1) + " °C"; }
+            }},
+        "waves": {file: WAVE_FLOW, label: "Significant Wave Height",
+            credit: WAVE_CREDIT, dateLabel: WAVE_DATE_LABEL,
+            landFill: true,
+            particles: WAVE_PARTICLES, flowFormat: seconds,
+            scalar: {
+                file: "data/current-ocean-wave-height-gfswave-0.25.json",
+                alpha: Math.floor(0.58 * 255),
+                // nullschool's waves palette: calm navy abyss → steel blue → teal →
+                // sand → storm orange/red (matched against the user's reference shot).
+                lut: segmentedLut([
+                    [0.0, [8, 12, 38]],
+                    [1.5, [28, 48, 112]],
+                    [3.0, [42, 94, 150]],
+                    [4.5, [65, 150, 170]],
+                    [6.0, [120, 195, 175]],
+                    [7.5, [190, 215, 150]],
+                    [9.0, [235, 200, 115]],
+                    [10.5, [235, 155, 65]],
+                    [12.0, [215, 100, 40]],
+                    [15.0, [165, 35, 20]]
+                ], 0, 15),
+                min: 0, max: 15,
+                scaleLabel: "0 &ndash; 15 m",
+                format: function (v) { return v.toFixed(1) + " m"; }
+            }},
+        "wavep": {file: WAVE_FLOW, label: "Peak Wave Period",
+            credit: WAVE_CREDIT, dateLabel: WAVE_DATE_LABEL,
+            landFill: true,
+            particles: WAVE_PARTICLES, flowFormat: seconds,
+            scalar: {
+                fromMagnitude: true,  // the flow file's magnitude IS the period (s)
+                alpha: Math.floor(0.58 * 255),
+                lut: colormapLut(d3.interpolateTurbo),  // rainbow steps like nullschool's period scale
+                min: 0, max: 25,
+                scaleLabel: "0 &ndash; 25 s",
+                format: seconds
             }}
     };
     var DEFAULT_LAYER = "surface";
