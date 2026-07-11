@@ -166,9 +166,12 @@ charcoal `#333338` — `topojson.merge`d country polygons filled on the `#lines`
 the overlay, so the vector coastline crops the grid staircase; `buildGrid`'s bilinear is
 NaN-tolerant (hole corners drop out, weights renormalize) so sea color reaches the last valid
 cell instead of retreating half a cell from every coast; the ocean overlay renders dimmer
-(alpha 0.58 vs 0.72) so the calm ocean stays near-black and the dense hairline trails
-(multiplier 7, line width 1.2 device px, intensity saturating at 0.7 m/s) read as the
-currents.
+(alpha 0.58 vs 0.72) so the calm ocean stays near-black and the trails (multiplier 4, line
+width 1.7 device px, velocityScale 1/1700, intensity saturating at 0.7 m/s — user-matched
+against live nullschool) read as the currents. Trails cannot spill onto land: `#lines` sits
+above `#animation`, so the opaque land fill crops them at the vector coastline. Water
+without current data (Caspian, Aral, coastal grid holes) renders `NO_DATA_GRAY` — the same
+charcoal as land — rather than a black hole.
 
 **CMEMS credentials**: `scripts/refresh_ocean.py` needs a Copernicus Marine account. The
 toolbox reads `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD` —
@@ -407,6 +410,13 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   NaN-tolerant renormalizing bilinear in `buildGrid` (sea color reaches the coast), ocean
   overlay dimmed to alpha 0.58 with denser/finer trails (multiplier 7, width 1.2,
   saturation 0.7 m/s) so currents read as luminous streamlines over near-black ocean.
+- **Ocean follow-up fixes** (user bug reports, same day): trail spill-over onto land ended
+  by moving `#lines` above `#animation` in the canvas stack — the opaque land fill now crops
+  trails at the vector coastline (the "boolean op" costs nothing); dataless water (Caspian,
+  Aral, coastal grid holes) painted `NO_DATA_GRAY` = the land charcoal instead of black, in
+  both the field and the drag preview; trails retuned to the confirmed nullschool character —
+  faster, sparser, slightly thicker (velocityScale 1/2500→1/1700, multiplier 7→4, width
+  1.2→1.7).
 
 All of the below landed on 2026-07-10 (the project went from the stock cambecc/earth port to
 its current state in one extended session):

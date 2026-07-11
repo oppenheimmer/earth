@@ -23,6 +23,8 @@
     var FRAME_RATE = 40;                      // desired milliseconds per frame
     var NULL_WIND_VECTOR = [NaN, NaN, null];  // no wind data at this location [u, v, mag]
     var TRANSPARENT_BLACK = [0, 0, 0, 0];
+    var NO_DATA_GRAY = [51, 51, 56, 255];     // = drawMap's #333338 land fill; ocean layers paint
+                                              // dataless water (Caspian, coastal grid holes) like land
     var MAX_INTENSITY = 25;                   // wind velocity (m/s) at which particle intensity is max (17 in the original; higher cap keeps storm bands from saturating white)
     var VELOCITY_SCALE = 1 / 42000;           // particle screen speed per unit of wind velocity (1/60000 in the original)
     var ZOOM_SPEED_EXPONENT = 0.6;            // 0 = speed grows fully with zoom (frantic close-up), 1 = constant speed at all zooms (sparse short tracks); 0.6 grows gently, ~2× at zoom 6
@@ -377,6 +379,8 @@
     // Two layers of line work: sphere fill + graticule live on #map, *below* the color
     // overlay; coastlines/borders/lakes live on #lines, *above* it — under the overlay the
     // 0.72 alpha dimmed outlines to ~30% brightness and they vanished behind the trails.
+    // #lines is also above #animation, so the ocean layers' opaque land fill crops any
+    // particle trail that strays past the coastline.
     function drawMap(fast) {
         if (!mesh) return;
 
@@ -526,6 +530,11 @@
                                 wind = distort(λ, φ, x, y, velocityScale, wind);
                                 color = overlayColorAt(λ, φ, scalar);
                             }
+                            else if (overlaySpec && overlaySpec.fromMagnitude) {
+                                // Dataless water on an ocean layer (Caspian, coastal grid
+                                // holes): render like the landmass, not as a black hole.
+                                color = NO_DATA_GRAY;
+                            }
                         }
                     }
                     column[y + 1] = column[y] = wind || NULL_WIND_VECTOR;
@@ -605,8 +614,9 @@
                 var coord = projection.invert(point);
                 if (coord && isFinite(coord[0])) {
                     var wind = grid.interpolate(coord[0], coord[1]);
-                    if (wind) {
-                        var color = overlayColorAt(coord[0], coord[1], wind[2]);
+                    var color = wind ? overlayColorAt(coord[0], coord[1], wind[2]) :
+                        overlaySpec && overlaySpec.fromMagnitude ? NO_DATA_GRAY : null;
+                    if (color) {
                         var k = (j * w + i) * 4;
                         data[k] = color[0];
                         data[k + 1] = color[1];
@@ -836,9 +846,10 @@
             dateLabel: "Data: CMEMS daily mean, ",
             landFill: true,  // charcoal continents above the overlay, nullschool-style
             // Currents peak ~1.5 m/s vs ~100 m/s wind: particles need a much larger velocity
-            // scale to visibly crawl, and trail brightness saturates early (0.7 m/s, cambecc's
-            // OSCAR value). Double-density hairline trails carry the texture like nullschool.
-            particles: {velocityScale: 1 / 2500, maxIntensity: 0.7, multiplier: 7, lineWidth: 1.2},
+            // scale to visibly flow, and trail brightness saturates early (0.7 m/s, cambecc's
+            // OSCAR value). Matched to nullschool by user comparison: moderately dense,
+            // slightly-thicker-than-wind strokes, faster motion (was 1/2500 · ×7 · 1.2 px).
+            particles: {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7},
             scalar: {
                 fromMagnitude: true,  // color by current speed itself — no second dataset
                 // Dimmer than the atmosphere layers: the near-black sphere bleeds through,
