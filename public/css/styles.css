@@ -74,6 +74,8 @@ html, body {
 
 #tabs {
     display: flex;
+    flex-direction: column;   /* domains stack: Atmosphere, then Ocean below it */
+    align-items: flex-start;
     gap: 6px;
     margin-bottom: 8px;
 }
@@ -102,7 +104,7 @@ html, body {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin-bottom: 8px;
+    margin-bottom: 2px;   /* #tabs' column gap provides the rest of the spacing */
 }
 
 .tab-body[hidden] {
