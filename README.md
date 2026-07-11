@@ -38,6 +38,7 @@ A minimal replica of the meteorological visualization from
         ├── current-rh-surface-level-gfs-0.25.json    # GFS 2 m relative humidity (~5 MB)
         ├── current-dewpoint-surface-level-gfs-0.25.json  # GFS 2 m dew point (~6 MB)
         ├── current-ocean-currents-cmems-0.33.json    # CMEMS surface current u/v, ⅓°, daily mean (~6.4 MB)
+        ├── current-ocean-temp-cmems-0.33.json        # CMEMS sea water temperature (thetao, °C), ⅓° (~3.3 MB)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
@@ -172,6 +173,18 @@ against live nullschool) read as the currents. Trails cannot spill onto land: `#
 above `#animation`, so the opaque land fill crops them at the vector coastline. Water
 without current data (Caspian, Aral, coastal grid holes) renders `NO_DATA_GRAY` — the same
 charcoal as land — rather than a black hole.
+
+The **sea water temperature layer** (`feature/SeaWaterTemperature`, 2026-07-12) pairs the
+currents-driven particles with a thetao scalar overlay
+(`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m`, °C at 0.494 m, same ⅓° grid) through the
+same bwr diverging colormap as the Atmosphere temperature layer, domain **0–50 °C** (user's
+spec; values outside pin to the end colors via the clamped LUT index — the ocean only uses
+the blue-to-light-pink half, white midpoint 25 °C cutting through the subtropics).
+`refresh_ocean.py` is parameterized like `refresh_wind.py`: `currents` (u/v) and
+`temperature` (thetao) products. **Depths**: both CMEMS datasets carry **50 depth levels**
+(0.494, 1.54, 2.65, 3.82, 5.08, 6.44, 7.93, 9.57, 11.4, 13.5, 15.8 … 55.8 … 109.7 … 453.9 …
+1062 … 5727.9 m); we render the shallowest (0.494 m). Deeper layers only need
+`minimum_depth`/`maximum_depth` changed in `fetch()` plus a LAYERS entry.
 
 **CMEMS credentials**: `scripts/refresh_ocean.py` needs a Copernicus Marine account. The
 toolbox reads `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD` —
@@ -315,8 +328,8 @@ status line; page/HUD title is plain "earth", per user request). The burger butt
      `#layer=<id>` in the URL hash selects the initial layer (also the headless-testing
      hook, since the menu needs a click). Since 2026-07-12 the domains **stack vertically**
      (`#tabs` is a column; each tab header sits directly above its own `.tab-body`): the
-     **Ocean tab** below Atmosphere holds **Current** (`data-layer="ocean"`, live) and a
-     disabled "Temperature soon" placeholder.
+     **Ocean tab** below Atmosphere holds **Current** (`data-layer="ocean"`) and
+     **Temperature** (`data-layer="sst"`), both live.
    - Data source + snapshot date lines, the color-scale bar, the click-for-wind-speed
      readout, and credits — all IDs (`#scale`, `#data-date`, `#location`, `#status`)
      unchanged, so `wind.js` needed no edits; `#status` lives in the always-visible bar so
@@ -344,10 +357,11 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
      RTOFS 2ds is netCDF-only, NOMADS OPeNDAP retired (SCN 25-81), OSCAR/jplOscar stale.
      Working fallback: NOAA CoastWatch ERDDAP `noaacwBLENDEDNRTcurrentsDaily` (0.25° blended
      geostrophic; `.ncoJson` + stride; needs curl — python-urllib UA gets 403).
-   - **Ocean temperature** (`feature/ocean-temperature` or similar): thetao scalar from
-     `cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m` (°C), Turbo colormap ≈ −2–32 °C, with
-     the currents file driving particles; `refresh_ocean.py`'s `record()`/`fetch()` split is
-     ready to be parameterized the way `refresh_wind.py`'s LEVELS/SCALARS dicts were.
+   - **Sea water temperature — DONE (2026-07-12, `feature/SeaWaterTemperature`)**: thetao
+     scalar over currents-driven particles, bwr 0–50 °C per user spec. Possible follow-up:
+     **depth-level layers** — both CMEMS datasets have 50 depths (0.494 m … 5727.9 m; e.g.
+     15.8 m, 109.7 m, 453.9 m are natural picks); `fetch()`'s minimum/maximum_depth plus a
+     LAYERS entry per depth is all it takes.
    - NB the venv (pygrib/PIL/numpy/copernicusmarine) lives in the session scratchpad under
      /tmp — likely wiped by reboot; recreate with `python3 -m venv gribenv && ./gribenv/bin/pip
      install pygrib pillow numpy copernicusmarine`.
@@ -391,6 +405,18 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `feature/SeaWaterTemperature`:
+
+- **Sea water temperature layer** (`sst`) — CMEMS thetao (°C, 0.494 m) as a scalar overlay
+  under the currents-driven particles; bwr diverging 0–50 °C (same scheme as Atmosphere
+  temperature; out-of-range pins to end colors). `refresh_ocean.py` parameterized into
+  PRODUCTS (`currents` / `temperature`), Ocean tab's Temperature button live.
+- **Ocean-layer generalizations** — dataless-water charcoal and the m/s click readout now
+  key on the layer (`landFill` / `flowFormat`) instead of the currents-only
+  `fromMagnitude` flag; shared OCEAN_* constants for file/credit/particles.
+- **Depths explored**: both CMEMS datasets carry 50 levels, 0.494–5727.9 m (we use the
+  shallowest); deeper layers need one `fetch()` parameter + a LAYERS entry.
 
 2026-07-12, on `feature/OceanCurrent`:
 
