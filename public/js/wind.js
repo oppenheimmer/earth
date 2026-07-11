@@ -171,11 +171,18 @@
 
             var x = i - fi, y = j - fj;
             var rx = 1 - x, ry = 1 - y;
-            var a = rx * ry, b = x * ry, c = rx * y, d = x * y;
             var i0 = fi * 2, i1 = ci * 2;
-            var u = row0[i0] * a + row0[i1] * b + row1[i0] * c + row1[i1] * d;
-            var v = row0[i0 + 1] * a + row0[i1 + 1] * b + row1[i0 + 1] * c + row1[i1 + 1] * d;
-            if (isNaN(u) || isNaN(v)) return null;  // NaN marks holes in the source data
+            // NaN-tolerant bilinear: hole corners (ocean grids mark land as NaN) drop out and
+            // the remaining weights renormalize, so color/flow reach the last valid cell instead
+            // of retreating half a cell from every coast (blocky staircase against the land).
+            var u = 0, v = 0, w = 0, k;
+            if (!isNaN(row0[i0])) { k = rx * ry; u += row0[i0] * k; v += row0[i0 + 1] * k; w += k; }
+            if (!isNaN(row0[i1])) { k = x * ry;  u += row0[i1] * k; v += row0[i1 + 1] * k; w += k; }
+            if (!isNaN(row1[i0])) { k = rx * y;  u += row1[i0] * k; v += row1[i0 + 1] * k; w += k; }
+            if (!isNaN(row1[i1])) { k = x * y;   u += row1[i1] * k; v += row1[i1 + 1] * k; w += k; }
+            if (w === 0) return null;  // all four corners are holes
+            u /= w;
+            v /= w;
             return [u, v, Math.sqrt(u * u + v * v)];
         }
 
@@ -272,7 +279,7 @@
         }
         var t = (v - overlaySpec.min) / (overlaySpec.max - overlaySpec.min);
         var c = overlaySpec.lut[Math.max(0, Math.min(255, Math.round(t * 255)))];
-        return [c[0], c[1], c[2], OVERLAY_ALPHA];
+        return [c[0], c[1], c[2], overlaySpec.alpha || OVERLAY_ALPHA];
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -394,6 +401,15 @@
         var lctx = linesCanvas.getContext("2d");
         var lpath = d3.geoPath(projection, lctx);
         lctx.clearRect(0, 0, view.width, view.height);
+        if (landFill) {
+            // Ocean layers: charcoal land painted *above* the overlay (nullschool's look).
+            // The crisp vector edge also crops the ⅓°-grid staircase where sea color
+            // bleeds past the coastline.
+            lctx.beginPath();
+            lpath(fast ? mesh.landLo : mesh.landHi);
+            lctx.fillStyle = "#333338";
+            lctx.fill();
+        }
         strokeOn(lctx, lpath, fast ? mesh.coastLo : mesh.coastHi, 1.0, 1.6);  // prominent continent outlines
         strokeOn(lctx, lpath, fast ? mesh.bordersLo : mesh.bordersHi, 0.3, 0.75);
         strokeOn(lctx, lpath, fast ? mesh.lakesLo : mesh.lakesHi, 0.4, 0.75);
@@ -622,7 +638,8 @@
         var buckets = colorStyles.map(function () { return []; });
         var dpr = window.devicePixelRatio || 1;
         // Scale count with dpr (capped) so thinner device-px trails keep the same visual density.
-        var particleCount = Math.round(bounds.width * PARTICLE_MULTIPLIER * Math.min(dpr, 2));
+        var particleCount = Math.round(bounds.width * (particleOpts.multiplier || PARTICLE_MULTIPLIER) *
+            Math.min(dpr, 2));
         if (isMobile()) {
             particleCount *= PARTICLE_REDUCTION;
         }
@@ -679,7 +696,8 @@
         }
 
         var g = animCtx;
-        g.lineWidth = PARTICLE_LINE_WIDTH / dpr;  // PARTICLE_LINE_WIDTH device px regardless of screen density
+        // The layer's line width in device px regardless of screen density.
+        g.lineWidth = (particleOpts.lineWidth || PARTICLE_LINE_WIDTH) / dpr;
         g.fillStyle = "rgba(0, 0, 0, 0.97)";  // per-frame trail fade: slow → long fluid streamlines
 
         function draw() {
@@ -816,11 +834,16 @@
         "ocean": {file: "data/current-ocean-currents-cmems-0.33.json", label: "Ocean Currents @ Surface",
             credit: "CMEMS &#8531;&deg; &nbsp;|&nbsp; Copernicus Marine Service",
             dateLabel: "Data: CMEMS daily mean, ",
-            // Currents peak ~1.5 m/s vs ~100 m/s wind: particles need a much larger
-            // velocity scale to visibly crawl, and trail brightness saturates at 1 m/s.
-            particles: {velocityScale: 1 / 2500, maxIntensity: 1.0},
+            landFill: true,  // charcoal continents above the overlay, nullschool-style
+            // Currents peak ~1.5 m/s vs ~100 m/s wind: particles need a much larger velocity
+            // scale to visibly crawl, and trail brightness saturates early (0.7 m/s, cambecc's
+            // OSCAR value). Double-density hairline trails carry the texture like nullschool.
+            particles: {velocityScale: 1 / 2500, maxIntensity: 0.7, multiplier: 7, lineWidth: 1.2},
             scalar: {
                 fromMagnitude: true,  // color by current speed itself — no second dataset
+                // Dimmer than the atmosphere layers: the near-black sphere bleeds through,
+                // deepening the calm-ocean blues so the bright trails read as the currents.
+                alpha: Math.floor(0.58 * 255),
                 // nullschool's ocean palette: deep blue abyss → green → sand → red jets
                 lut: segmentedLut([
                     [0.0, [10, 25, 68]],
@@ -845,6 +868,7 @@
     var scalarGrid = null;    // secondary scalar field of the current layer, or null
     var overlaySpec = null;   // the current layer's scalar spec, or null (= wind-speed overlay)
     var particleOpts = DEFAULT_PARTICLES;  // the current layer's animation tuning
+    var landFill = false;     // charcoal land above the overlay (ocean layers)
 
     function cancelWork() {
         currentCancel.requested = true;
@@ -921,6 +945,7 @@
             overlaySpec = layer.scalar || null;
             scalarGrid = results.length > 1 ? buildScalarGrid(results[1]) : null;
             particleOpts = layer.particles || DEFAULT_PARTICLES;
+            landFill = !!layer.landFill;
             drawScaleBar();
             document.getElementById("data-label").innerHTML = layer.credit || DEFAULT_CREDIT;
             document.getElementById("data-date").textContent =
@@ -1057,7 +1082,10 @@
                 lakesLo: topojson.feature(topo, topo.objects.lakes_110m),
                 // a !== b keeps only shared (internal) borders; coastlines are drawn separately
                 bordersHi: topojson.mesh(c50, c50.objects.countries, function (a, b) { return a !== b; }),
-                bordersLo: topojson.mesh(c110, c110.objects.countries, function (a, b) { return a !== b; })
+                bordersLo: topojson.mesh(c110, c110.objects.countries, function (a, b) { return a !== b; }),
+                // all countries merged into one landmass, for the ocean layers' charcoal fill
+                landHi: topojson.merge(c50, c50.objects.countries.geometries),
+                landLo: topojson.merge(c110, c110.objects.countries.geometries)
             };
             drawMap(false);
             loadLayer(layerId);

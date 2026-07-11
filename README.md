@@ -20,7 +20,7 @@ A minimal replica of the meteorological visualization from
 ├── start.sh                     # local launcher: serves public/ on :8420 and opens browser
 ├── scripts/
 │   ├── refresh_wind.py          # GFS data refresh, pygrib-based (verified working)
-│   └── refresh_ocean.py         # CMEMS ocean-current refresh via copernicusmarine toolbox (needs login)
+│   └── refresh_ocean.py         # CMEMS ocean-current refresh via copernicusmarine toolbox (creds: .env/)
 └── public/                      # the entire deployable site
     ├── index.html               # four stacked canvases (#map, #overlay, #lines, #animation) + burger-menu HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
@@ -37,7 +37,7 @@ A minimal replica of the meteorological visualization from
         ├── current-temp-surface-level-gfs-0.25.json  # GFS 2 m temperature (~6 MB)
         ├── current-rh-surface-level-gfs-0.25.json    # GFS 2 m relative humidity (~5 MB)
         ├── current-dewpoint-surface-level-gfs-0.25.json  # GFS 2 m dew point (~6 MB)
-        ├── current-ocean-currents-cmems-0.33.json    # CMEMS surface current u/v (⅓°; see Data — stand-in inside)
+        ├── current-ocean-currents-cmems-0.33.json    # CMEMS surface current u/v, ⅓°, daily mean (~6.4 MB)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
@@ -159,11 +159,23 @@ cambecc's segmented ocean palette (deep blue 0 → green 0.4 → sand 0.65–1.0
 and per-layer `particles` tuning (`velocityScale` 1/2500 ≈ 17× wind, `maxIntensity` 1 m/s —
 the data-driven streak guard scales along) makes the ~50×-slower currents visibly crawl.
 CMEMS land cells are null → land stays uncolored and particle-free for free.
-**⚠ The JSON currently in `public/data/` is a stand-in**: real NOAA CoastWatch blended
-geostrophic currents (0.25°, `noaacwBLENDEDNRTcurrentsDaily`, 2026-07-09) fetched via ERDDAP
-`.ncoJson` and converted through the same `record()` emitter, used to verify the rendering
-because CMEMS needs credentials. It is deliberately **not committed**; regenerate with the
-real source after `copernicusmarine login` (see Next steps).
+**Last refreshed: CMEMS daily mean 2026-07-11** (real credentialed fetch; an earlier
+CoastWatch ERDDAP stand-in used for pre-login verification has been replaced).
+Nullschool-parity rendering (2026-07-12, from the user's side-by-side screenshots): land is
+charcoal `#333338` — `topojson.merge`d country polygons filled on the `#lines` canvas *above*
+the overlay, so the vector coastline crops the grid staircase; `buildGrid`'s bilinear is
+NaN-tolerant (hole corners drop out, weights renormalize) so sea color reaches the last valid
+cell instead of retreating half a cell from every coast; the ocean overlay renders dimmer
+(alpha 0.58 vs 0.72) so the calm ocean stays near-black and the dense hairline trails
+(multiplier 7, line width 1.2 device px, intensity saturating at 0.7 m/s) read as the
+currents.
+
+**CMEMS credentials**: `scripts/refresh_ocean.py` needs a Copernicus Marine account. The
+toolbox reads `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD` —
+locally these live in the git-ignored `.env/copernicusmarine` (run
+`set -a && source .env/copernicusmarine && set +a` before the script); in CI they become
+GitHub Actions repository secrets. Anonymous access does not work (the ARCO zarr store 403s
+every data chunk).
 
 To refresh (preferred path, verified working — no Java needed):
 
@@ -315,18 +327,11 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
 
 ## Next steps
 
-   - **Ocean currents — BUILT on `feature/OceanCurrent` (2026-07-12), awaiting CMEMS login
-     before merge.** Engine, menu (vertical Ocean tab with live "Current"), palette,
-     per-layer particle tuning and `scripts/refresh_ocean.py` are done and headless-verified
-     (full disc, open menu, zoomed Indian Ocean — Somali Current red jet matches
-     `../Ocean.png`; wind + temperature layers regression-checked). Remaining steps:
-       1. User runs `copernicusmarine login` (toolbox v2.4.1 installed in the venv;
-          credentials persist in `$HOME/.copernicusmarine/`). Env-var alternative:
-          `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD`.
-       2. Run `./gribenv/bin/python scripts/refresh_ocean.py` to replace the stand-in JSON
-          with real CMEMS data, re-verify headlessly, commit the dataset.
-       3. Merge `feature/OceanCurrent` into `main` with `--no-ff`, delete the branch.
-     **Data-access correction** (previous session's note was wrong): the CMEMS ARCO zarr is
+   - **Ocean currents — DONE (2026-07-12, `feature/OceanCurrent`).** Real CMEMS data via
+     the user's credentials in `.env/copernicusmarine`; nullschool-parity pass (charcoal
+     land fill, NaN-tolerant bilinear, dim overlay + dense hairline trails) verified against
+     the user's side-by-side screenshots; atmosphere layers regression-checked.
+     **Data-access facts** (previous session's note was wrong): the CMEMS ARCO zarr is
      *not* fully anonymous — `.zmetadata` and coordinate chunks GET fine, but every data
      chunk (`uo/{t}.0.0.0` etc.) returns **403**, verified across chunk indices and both
      dimension separators. Hence the credentialed toolbox. Store facts that remain true:
@@ -384,7 +389,7 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
 
 ## Changes
 
-2026-07-12, on `feature/OceanCurrent` (unmerged until real CMEMS data lands):
+2026-07-12, on `feature/OceanCurrent`:
 
 - **Ocean currents layer** — new `ocean` entry in `LAYERS`: CMEMS surface currents drive
   both particles and a `fromMagnitude` speed overlay (segmented nullschool ocean palette,
@@ -395,8 +400,13 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   layer row; Ocean sits below Atmosphere with live **Current** and a "Temperature soon"
   placeholder; `loadLayer()` also reveals the owning tab when booting from `#layer=…`.
 - **`scripts/refresh_ocean.py`** — copernicusmarine-toolbox reader (1/12° → stride ×4 → ⅓°,
-  grib2json output, land = null). Blocked on `copernicusmarine login`; rendering was
-  verified with a CoastWatch ERDDAP stand-in dataset (not committed).
+  grib2json output, land = null); credentials from the git-ignored `.env/copernicusmarine`.
+  First real dataset (2026-07-11 daily mean) committed.
+- **Nullschool-parity pass** (user screenshot comparison): charcoal `#333338` land fill
+  above the overlay (crisp vector coasts instead of black land + blocky grid staircase),
+  NaN-tolerant renormalizing bilinear in `buildGrid` (sea color reaches the coast), ocean
+  overlay dimmed to alpha 0.58 with denser/finer trails (multiplier 7, width 1.2,
+  saturation 0.7 m/s) so currents read as luminous streamlines over near-black ocean.
 
 All of the below landed on 2026-07-10 (the project went from the stock cambecc/earth port to
 its current state in one extended session):
