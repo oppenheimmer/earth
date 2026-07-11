@@ -38,7 +38,7 @@ A minimal replica of the meteorological visualization from
         ├── current-rh-surface-level-gfs-0.25.json    # GFS 2 m relative humidity (~5 MB)
         ├── current-dewpoint-surface-level-gfs-0.25.json  # GFS 2 m dew point (~6 MB)
         ├── current-ocean-currents-cmems-0.25.json    # CMEMS current u/v @ 0.494 m, ¼°, daily mean (~11 MB)
-        ├── current-ocean-currents-110m-cmems-0.25.json  # CMEMS current u/v @ 109.73 m (~11 MB)
+        ├── current-ocean-currents-25m-cmems-0.25.json   # CMEMS current u/v @ 25.211 m (~11 MB)
         ├── current-ocean-temp-cmems-0.25.json        # CMEMS sea water temperature (thetao, °C), ¼° (~6 MB)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
@@ -144,8 +144,9 @@ layers: 2 m TMP / RH / DPT as single-record grib2json files
 (`current-{temp,rh,dewpoint}-surface-level-gfs-0.25.json`). A combined layer pairs surface
 wind (particle trails) with a scalar field colored through a d3-scale-chromatic colormap LUT
 (the vendored D3 bundle ships them, except bwr — hand-rolled two-segment ramp):
-**Temperature → matplotlib 'bwr' diverging (223.15–323.15 K, symmetric so the white point
-sits exactly on 0 °C: blue frozen, white freezing, red heat), Relative humidity → BuPu
+**Temperature → matplotlib 'bwr' diverging (263.15–318.15 K = -10–45 °C, user-revised
+2026-07-12 from the ±50 °C symmetric domain; out-of-range pins to the end colors, white
+midpoint at 17.5 °C), Relative humidity → BuPu
 (0–100 %), Dew point → PuBuGn (233.15–308.15 K)**. Colormap history (all user-directed,
 same day): temperature inferno → reversed inferno → YlOrRd (0–50 °C floor — a -40 floor
 pushed everything visible into red) → bwr; RH Purples → BuPu for contrast. The scale bar and the
@@ -181,8 +182,8 @@ currents-driven particles with a thetao scalar overlay
 same bwr diverging colormap as the Atmosphere temperature layer, domain **0–35 °C** (user's
 spec, revised same day from 0–50; values outside pin to the end colors via the clamped LUT
 index — the white midpoint sits at 17.5 °C so tropical water reads warm-red).
-`refresh_ocean.py` is parameterized like `refresh_wind.py`: `currents` / `currents110`
-(u/v at 0.494 m / 109.73 m) and `temperature` (thetao) products, each with a `depth`
+`refresh_ocean.py` is parameterized like `refresh_wind.py`: `currents` / `currents25`
+(u/v at 0.494 m / 25.211 m) and `temperature` (thetao) products, each with a `depth`
 bracket; its `coarsen()` samples every 3rd point (1/12° → ¼°, atmosphere-grid parity) and
 fills land-sampled points from the surrounding 7×7 full-res window so the data's coast hugs
 the vector one (kills the charcoal staircase in the sea; tightened twice on user review —
@@ -335,7 +336,7 @@ status line; page/HUD title is plain "earth", per user request). The burger butt
      hook, since the menu needs a click). Since 2026-07-12 the domains **stack vertically**
      (`#tabs` is a column; each tab header sits directly above its own `.tab-body`): the
      **Ocean tab** below Atmosphere holds **Current-Surface** (`data-layer="ocean"`),
-     **Current-110m** (`data-layer="ocean110"`) and **Temperature** (`data-layer="sst"`),
+     **Current-25m** (`data-layer="ocean25"`) and **Temperature** (`data-layer="sst"`),
      all live.
    - Data source + snapshot date lines, the color-scale bar, the click-for-wind-speed
      readout, and credits — all IDs (`#scale`, `#data-date`, `#location`, `#status`)
@@ -412,6 +413,15 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `main` (post-merge tuning, second round):
+
+- **Deep-current level 110 m → 25 m** (user pick): layer id `ocean110`→`ocean25`, button
+  **Current-25m**, data at the 25.211 m level (near the mixed-layer base) — product
+  `currents25`, file `current-ocean-currents-25m-cmems-0.25.json`.
+- **Atmosphere temperature domain -50–50 → -10–45 °C** (user spec): populated range gets
+  the full bwr stretch, endpoints pin (same clamping as the ocean scale); the white point
+  moves from 0 °C to 17.5 °C.
 
 2026-07-12, on `main` (post-merge tuning):
 

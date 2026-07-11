@@ -846,11 +846,12 @@
         "10hpa": {file: "data/current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
         "temperature": {file: SURFACE_WIND, label: "Temperature @ Surface", scalar: {
             file: "data/current-temp-surface-level-gfs-0.25.json",
-            // bwr diverging (user preference): blue below freezing, white at 0 °C, red heat.
-            // Symmetric domain keeps the white point exactly on 0 °C.
+            // bwr diverging, domain -10–45 °C (user spec, was ±50): the populated range
+            // gets the color stretch; beyond the endpoints pins to the end colors via
+            // the clamped LUT index. White midpoint sits at 17.5 °C.
             lut: colormapLut(bwrInterpolator),
-            min: 223.15, max: 323.15,  // -50 – 50 °C
-            scaleLabel: "-50 &ndash; 50 &deg;C",
+            min: 263.15, max: 318.15,  // -10 – 45 °C
+            scaleLabel: "-10 &ndash; 45 &deg;C",
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
         }},
         "rh": {file: SURFACE_WIND, label: "Rel. Humidity @ Surface", scalar: {
@@ -872,11 +873,10 @@
             landFill: true,  // charcoal continents above the overlay, nullschool-style
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
             scalar: CURRENT_SPEED_SCALAR},
-        // 109.73 m: below the surface mixed layer — the climate-relevant horizon where the
-        // Equatorial Undercurrent and the western-boundary-current cores show up, invisible
-        // in the surface layer.
-        "ocean110": {file: "data/current-ocean-currents-110m-cmems-0.25.json",
-            label: "Ocean Currents @ 110 m",
+        // 25.21 m: near the base of the tropical mixed layer — the flow starts diverging
+        // from the wind-driven surface drift (user pick, was 109.73 m).
+        "ocean25": {file: "data/current-ocean-currents-25m-cmems-0.25.json",
+            label: "Ocean Currents @ 25 m",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,

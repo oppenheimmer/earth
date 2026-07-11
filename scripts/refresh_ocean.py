@@ -6,8 +6,8 @@ earth.nullschool.net uses for ocean currents.
 
 Products (see PRODUCTS):
     currents      uo/vo currents at 0.494 m (surface), two-record u/v file
-    currents110   uo/vo currents at 109.73 m — below the mixed layer, where the
-                  Equatorial Undercurrent and boundary-current cores live
+    currents25    uo/vo currents at 25.211 m — near the mixed-layer base, where
+                  the flow starts diverging from the wind-driven surface drift
     temperature   thetao sea water potential temperature (°C), single record
 
 Uses the official Copernicus Marine Toolbox, which needs credentials: locally
@@ -57,10 +57,10 @@ PRODUCTS = {
         "out": "current-ocean-currents-cmems-0.25.json",
         "params": CURRENT_PARAMS,
     },
-    "currents110": {
+    "currents25": {
         "dataset_id": "cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m",
-        "variables": ["uo", "vo"], "depth": [100, 120],  # only the 109.73 m level
-        "out": "current-ocean-currents-110m-cmems-0.25.json",
+        "variables": ["uo", "vo"], "depth": [23, 27],  # only the 25.211 m level
+        "out": "current-ocean-currents-25m-cmems-0.25.json",
         "params": CURRENT_PARAMS,
     },
     "temperature": {
