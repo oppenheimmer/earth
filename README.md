@@ -37,9 +37,9 @@ A minimal replica of the meteorological visualization from
         ├── current-temp-surface-level-gfs-0.25.json  # GFS 2 m temperature (~6 MB)
         ├── current-rh-surface-level-gfs-0.25.json    # GFS 2 m relative humidity (~5 MB)
         ├── current-dewpoint-surface-level-gfs-0.25.json  # GFS 2 m dew point (~6 MB)
-        ├── current-ocean-currents-cmems-0.33.json    # CMEMS current u/v @ 0.494 m, ⅓°, daily mean (~6.4 MB)
-        ├── current-ocean-currents-110m-cmems-0.33.json  # CMEMS current u/v @ 109.73 m (~6 MB)
-        ├── current-ocean-temp-cmems-0.33.json        # CMEMS sea water temperature (thetao, °C), ⅓° (~3.3 MB)
+        ├── current-ocean-currents-cmems-0.25.json    # CMEMS current u/v @ 0.494 m, ¼°, daily mean (~11 MB)
+        ├── current-ocean-currents-110m-cmems-0.25.json  # CMEMS current u/v @ 109.73 m (~11 MB)
+        ├── current-ocean-temp-cmems-0.25.json        # CMEMS sea water temperature (thetao, °C), ¼° (~6 MB)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
@@ -152,10 +152,10 @@ pushed everything visible into red) → bwr; RH Purples → BuPu for contrast. T
 click readout follow the active layer (`overlaySpec.format`; scalar value · wind speed).
 
 The **ocean currents layer** (`feature/OceanCurrent`, 2026-07-12) reads
-`current-ocean-currents-cmems-0.33.json`: a 2-record u/v file in the same grib2json format,
+`current-ocean-currents-cmems-0.25.json`: a 2-record u/v file in the same grib2json format,
 from **CMEMS Global Ocean Physics Analysis & Forecast**
 (`cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m`, daily mean, 0.494 m depth, 1/12° strided ×4 to
-⅓°) via `scripts/refresh_ocean.py` + the `copernicusmarine` toolbox. The layer has no second
+¼°) via `scripts/refresh_ocean.py` + the `copernicusmarine` toolbox. The layer has no second
 scalar file — a `fromMagnitude` overlaySpec colors the sea by current speed itself through
 cambecc's segmented ocean palette (deep blue 0 → green 0.4 → sand 0.65–1.0 → red 1.5 m/s),
 and per-layer `particles` tuning (`velocityScale` 1/2500 ≈ 17× wind, `maxIntensity` 1 m/s —
@@ -177,14 +177,16 @@ charcoal as land — rather than a black hole.
 
 The **sea water temperature layer** (`feature/SeaWaterTemperature`, 2026-07-12) pairs the
 currents-driven particles with a thetao scalar overlay
-(`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m`, °C at 0.494 m, same ⅓° grid) through the
+(`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m`, °C at 0.494 m, same ¼° grid) through the
 same bwr diverging colormap as the Atmosphere temperature layer, domain **0–35 °C** (user's
 spec, revised same day from 0–50; values outside pin to the end colors via the clamped LUT
 index — the white midpoint sits at 17.5 °C so tropical water reads warm-red).
 `refresh_ocean.py` is parameterized like `refresh_wind.py`: `currents` / `currents110`
 (u/v at 0.494 m / 109.73 m) and `temperature` (thetao) products, each with a `depth`
-bracket; its `coarsen()` fills land-sampled ⅓° points from the surrounding 5×5 full-res
-window so the data's coast hugs the vector one (kills the charcoal staircase in the sea).
+bracket; its `coarsen()` samples every 3rd point (1/12° → ¼°, atmosphere-grid parity) and
+fills land-sampled points from the surrounding 7×7 full-res window so the data's coast hugs
+the vector one (kills the charcoal staircase in the sea; tightened twice on user review —
+the first pass at ⅓° + 5×5 still left single-cell nubs on convoluted coasts).
 **Depths**: both CMEMS datasets carry **50 depth levels**
 (0.494, 1.54, 2.65, 3.82, 5.08, 6.44, 7.93, 9.57, 11.4, 13.5, 15.8 … 55.8 … 109.7 … 453.9 …
 1062 … 5727.9 m); we render the shallowest (0.494 m). Deeper layers only need
@@ -410,6 +412,13 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `main` (post-merge tuning):
+
+- **Residual blockiness tuned away** (third user pass): ocean grids re-coarsened at
+  **¼°** (stride 3 — atmosphere-grid parity) with a **7×7** NaN-fill window (±one output
+  cell), replacing ⅓° + 5×5 whose single-cell charcoal nubs still showed on convoluted
+  coasts. Data files renamed `…-cmems-0.25.json` (currents ~11 MB, thetao ~6 MB).
 
 2026-07-12, on `feature/DeepCurrent`:
 

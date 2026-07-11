@@ -811,8 +811,8 @@
     var SURFACE_WIND = "data/current-wind-surface-level-gfs-0.25.json";
     // Shared by the Ocean layers: CMEMS currents drive the particles everywhere (as surface
     // wind does for the Atmosphere scalar layers), and the readout speaks m/s, not km/h.
-    var OCEAN_CURRENTS = "data/current-ocean-currents-cmems-0.33.json";
-    var OCEAN_CREDIT = "CMEMS &#8531;&deg; &nbsp;|&nbsp; Copernicus Marine Service";
+    var OCEAN_CURRENTS = "data/current-ocean-currents-cmems-0.25.json";
+    var OCEAN_CREDIT = "CMEMS 0.25&deg; &nbsp;|&nbsp; Copernicus Marine Service";
     var OCEAN_DATE_LABEL = "Data: CMEMS daily mean, ";
     // Currents peak ~1.5 m/s vs ~100 m/s wind: particles need a much larger velocity
     // scale to visibly flow, and trail brightness saturates early (0.7 m/s, cambecc's
@@ -875,7 +875,7 @@
         // 109.73 m: below the surface mixed layer — the climate-relevant horizon where the
         // Equatorial Undercurrent and the western-boundary-current cores show up, invisible
         // in the surface layer.
-        "ocean110": {file: "data/current-ocean-currents-110m-cmems-0.33.json",
+        "ocean110": {file: "data/current-ocean-currents-110m-cmems-0.25.json",
             label: "Ocean Currents @ 110 m",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true,
@@ -886,7 +886,7 @@
             landFill: true,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
             scalar: {
-                file: "data/current-ocean-temp-cmems-0.33.json",
+                file: "data/current-ocean-temp-cmems-0.25.json",
                 // Same bwr diverging scheme as the Atmosphere temperature layer. Upper
                 // limit pinned at 35 °C (user's spec — the ocean never gets hotter, so a
                 // 50 °C ceiling wasted the red half). thetao is already °C. Values outside
