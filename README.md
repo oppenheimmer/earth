@@ -37,7 +37,8 @@ A minimal replica of the meteorological visualization from
         ├── current-temp-surface-level-gfs-0.25.json  # GFS 2 m temperature (~6 MB)
         ├── current-rh-surface-level-gfs-0.25.json    # GFS 2 m relative humidity (~5 MB)
         ├── current-dewpoint-surface-level-gfs-0.25.json  # GFS 2 m dew point (~6 MB)
-        ├── current-ocean-currents-cmems-0.33.json    # CMEMS surface current u/v, ⅓°, daily mean (~6.4 MB)
+        ├── current-ocean-currents-cmems-0.33.json    # CMEMS current u/v @ 0.494 m, ⅓°, daily mean (~6.4 MB)
+        ├── current-ocean-currents-110m-cmems-0.33.json  # CMEMS current u/v @ 109.73 m (~6 MB)
         ├── current-ocean-temp-cmems-0.33.json        # CMEMS sea water temperature (thetao, °C), ⅓° (~3.3 MB)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
@@ -177,11 +178,14 @@ charcoal as land — rather than a black hole.
 The **sea water temperature layer** (`feature/SeaWaterTemperature`, 2026-07-12) pairs the
 currents-driven particles with a thetao scalar overlay
 (`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m`, °C at 0.494 m, same ⅓° grid) through the
-same bwr diverging colormap as the Atmosphere temperature layer, domain **0–50 °C** (user's
-spec; values outside pin to the end colors via the clamped LUT index — the ocean only uses
-the blue-to-light-pink half, white midpoint 25 °C cutting through the subtropics).
-`refresh_ocean.py` is parameterized like `refresh_wind.py`: `currents` (u/v) and
-`temperature` (thetao) products. **Depths**: both CMEMS datasets carry **50 depth levels**
+same bwr diverging colormap as the Atmosphere temperature layer, domain **0–35 °C** (user's
+spec, revised same day from 0–50; values outside pin to the end colors via the clamped LUT
+index — the white midpoint sits at 17.5 °C so tropical water reads warm-red).
+`refresh_ocean.py` is parameterized like `refresh_wind.py`: `currents` / `currents110`
+(u/v at 0.494 m / 109.73 m) and `temperature` (thetao) products, each with a `depth`
+bracket; its `coarsen()` fills land-sampled ⅓° points from the surrounding 5×5 full-res
+window so the data's coast hugs the vector one (kills the charcoal staircase in the sea).
+**Depths**: both CMEMS datasets carry **50 depth levels**
 (0.494, 1.54, 2.65, 3.82, 5.08, 6.44, 7.93, 9.57, 11.4, 13.5, 15.8 … 55.8 … 109.7 … 453.9 …
 1062 … 5727.9 m); we render the shallowest (0.494 m). Deeper layers only need
 `minimum_depth`/`maximum_depth` changed in `fetch()` plus a LAYERS entry.
@@ -328,8 +332,9 @@ status line; page/HUD title is plain "earth", per user request). The burger butt
      `#layer=<id>` in the URL hash selects the initial layer (also the headless-testing
      hook, since the menu needs a click). Since 2026-07-12 the domains **stack vertically**
      (`#tabs` is a column; each tab header sits directly above its own `.tab-body`): the
-     **Ocean tab** below Atmosphere holds **Current** (`data-layer="ocean"`) and
-     **Temperature** (`data-layer="sst"`), both live.
+     **Ocean tab** below Atmosphere holds **Current-Surface** (`data-layer="ocean"`),
+     **Current-110m** (`data-layer="ocean110"`) and **Temperature** (`data-layer="sst"`),
+     all live.
    - Data source + snapshot date lines, the color-scale bar, the click-for-wind-speed
      readout, and credits — all IDs (`#scale`, `#data-date`, `#location`, `#status`)
      unchanged, so `wind.js` needed no edits; `#status` lives in the always-visible bar so
@@ -405,6 +410,23 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `feature/DeepCurrent`:
+
+- **Current @ 110 m layer** (`ocean110`) — uo/vo at the 109.73 m level (below the mixed
+  layer: the Equatorial Undercurrent and boundary-current cores, invisible at the
+  surface). Menu buttons renamed **Current-Surface** / **Current-110m**; the two current
+  layers share one `CURRENT_SPEED_SCALAR` spec; `refresh_ocean.py` products carry a
+  `depth` bracket and the header's `surface1Value` reports the real level.
+- **Coastal blockiness fixed in the data** (user bug report, ScreenshotSST): striding the
+  1/12° grid marked a ⅓° cell "land" whenever its exact sample point was — a land mask a
+  whole cell fatter than the vector coastline (charcoal staircase in the sea). `coarsen()`
+  now fills land-sampled points with the mean of the surrounding 5×5 full-res window, so
+  the data's sea reaches within one 1/12° cell of the real coast. All three ocean datasets
+  regenerated.
+- **SST domain 0–50 → 0–35 °C** (user spec): the ocean never gets hotter, so the red half
+  of bwr was wasted; the white midpoint now sits at 17.5 °C and tropical water reads
+  warm-red.
 
 2026-07-12, on `feature/SeaWaterTemperature`:
 

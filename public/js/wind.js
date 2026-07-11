@@ -820,6 +820,25 @@
     // slightly-thicker-than-wind strokes, faster motion (was 1/2500 · ×7 · 1.2 px).
     var OCEAN_PARTICLES = {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7};
     function metersPerSecond(v) { return v.toFixed(2) + " m/s"; }
+    // One spec shared by every current-speed layer (surface, 110 m):
+    var CURRENT_SPEED_SCALAR = {
+        fromMagnitude: true,  // color by current speed itself — no second dataset
+        // Dimmer than the atmosphere layers: the near-black sphere bleeds through,
+        // deepening the calm-ocean blues so the bright trails read as the currents.
+        alpha: Math.floor(0.58 * 255),
+        // nullschool's ocean palette: deep blue abyss → green → sand → red jets
+        lut: segmentedLut([
+            [0.0, [10, 25, 68]],
+            [0.15, [10, 25, 250]],
+            [0.4, [24, 255, 93]],
+            [0.65, [255, 233, 102]],
+            [1.0, [255, 233, 15]],
+            [1.5, [255, 15, 15]]
+        ], 0, 1.5),
+        min: 0, max: 1.5,
+        scaleLabel: "0 &ndash; 1.5 m/s",
+        format: metersPerSecond
+    };
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
         "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
@@ -852,36 +871,29 @@
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true,  // charcoal continents above the overlay, nullschool-style
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
-            scalar: {
-                fromMagnitude: true,  // color by current speed itself — no second dataset
-                // Dimmer than the atmosphere layers: the near-black sphere bleeds through,
-                // deepening the calm-ocean blues so the bright trails read as the currents.
-                alpha: Math.floor(0.58 * 255),
-                // nullschool's ocean palette: deep blue abyss → green → sand → red jets
-                lut: segmentedLut([
-                    [0.0, [10, 25, 68]],
-                    [0.15, [10, 25, 250]],
-                    [0.4, [24, 255, 93]],
-                    [0.65, [255, 233, 102]],
-                    [1.0, [255, 233, 15]],
-                    [1.5, [255, 15, 15]]
-                ], 0, 1.5),
-                min: 0, max: 1.5,
-                scaleLabel: "0 &ndash; 1.5 m/s",
-                format: metersPerSecond
-            }},
+            scalar: CURRENT_SPEED_SCALAR},
+        // 109.73 m: below the surface mixed layer — the climate-relevant horizon where the
+        // Equatorial Undercurrent and the western-boundary-current cores show up, invisible
+        // in the surface layer.
+        "ocean110": {file: "data/current-ocean-currents-110m-cmems-0.33.json",
+            label: "Ocean Currents @ 110 m",
+            credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
+            landFill: true,
+            particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
+            scalar: CURRENT_SPEED_SCALAR},
         "sst": {file: OCEAN_CURRENTS, label: "Sea Water Temperature @ Surface",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
             scalar: {
                 file: "data/current-ocean-temp-cmems-0.33.json",
-                // Same bwr diverging scheme as the Atmosphere temperature layer, over
-                // 0–50 °C (user's spec). thetao is already °C. Values outside the domain
-                // pin to the end colors — the LUT index is clamped in overlayColorAt.
+                // Same bwr diverging scheme as the Atmosphere temperature layer. Upper
+                // limit pinned at 35 °C (user's spec — the ocean never gets hotter, so a
+                // 50 °C ceiling wasted the red half). thetao is already °C. Values outside
+                // the domain pin to the end colors — the LUT index is clamped.
                 lut: colormapLut(bwrInterpolator),
-                min: 0, max: 50,
-                scaleLabel: "0 &ndash; 50 &deg;C",
+                min: 0, max: 35,
+                scaleLabel: "0 &ndash; 35 &deg;C",
                 format: function (v) { return v.toFixed(1) + " °C"; }
             }}
     };
