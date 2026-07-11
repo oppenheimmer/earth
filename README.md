@@ -209,13 +209,15 @@ the click readout speaks seconds, no third file. `current-ocean-wave-height-gfsw
 is the HTSGW scalar. Both fields get a 5×5 NaN-dilation pass at native 0.25° (the wave
 model's land mask is a cell fatter than the vector coastline — same staircase bug as CMEMS,
 same cure). Two layers share the flow file: **Wave-Height** (`waves`) colors by significant
-wave height through a segmented navy → steel → teal → sand → orange/red palette (0–15 m,
-matched against the user's nullschool reference), **Wave-Period** (`wavep`) through
-d3.interpolateTurbo (0–25 s). The particles render as nullschool's short chunky **crest
-dashes**, not streamlines: `particleOpts` grew per-layer `maxAge` (14 vs default 100) and
-`fade` (0.75 vs 0.97) so only the last few segments survive, with sparse thick strokes
-(multiplier 1.5, width 2.9, velocityScale 1/12000, intensity saturating at 22 s — long swell
-marches faster and brighter).
+wave height through a **white → gray → teal** ramp (0–15 m, user spec: silvery calm seas,
+deep-teal storm seas; replaced the first cut's navy→orange), **Wave-Period** (`wavep`)
+through d3.interpolateTurbo (0–25 s). The particles are **crest dashes, not trails** (user
+spec against a zoomed nullschool shot): `animate()` grew per-layer `maxAge`/`fade` and a
+`crestLength` mode that strokes an oriented dash PERPENDICULAR to travel through the segment
+midpoint — dense flickering crest rows creeping forward at 1/10th the first cut's speed
+(velocityScale 1/120000) and dying fast (maxAge 12, fade 0.6, multiplier 3, width 2.5;
+crest half-length 4.5 px scaled by the intensity bucket, so long swell draws longer,
+brighter crests).
 
 **CMEMS credentials**: `scripts/refresh_ocean.py` needs a Copernicus Marine account. The
 toolbox reads `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD` —
@@ -439,6 +441,15 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `main` (wave-layer redesign, user feedback on the first render):
+
+- **Crest dashes** — wave particles now stroke an oriented dash **perpendicular to travel**
+  (`crestLength` mode in `animate()`), march at **1/10th** the previous speed
+  (velocityScale 1/120000) and die quickly (maxAge 12, fade 0.6): a flickering crest field
+  like the user's zoomed nullschool screenshot, nothing like the wind traces.
+- **Wave-height colormap → white → gray → teal** (user spec): silvery calm seas, deep-teal
+  storm core; the navy→sand→orange first cut is gone.
 
 2026-07-12, on `feature/OceanWaves`:
 

@@ -651,6 +651,7 @@
         // Trail shape is a per-layer choice: long fluid streamlines (winds, currents) vs
         // the wave layers' short crest dashes (small maxAge + fast fade).
         var maxAge = particleOpts.maxAge || MAX_PARTICLE_AGE;
+        var crest = particleOpts.crestLength || 0;  // >0: dash ⊥ to travel instead of a trail segment
         // Scale count with dpr (capped) so thinner device-px trails keep the same visual density.
         var particleCount = Math.round(bounds.width * (particleOpts.multiplier || PARTICLE_MULTIPLIER) *
             Math.min(dpr, 2));
@@ -728,9 +729,27 @@
                 if (bucket.length > 0) {
                     g.beginPath();
                     g.strokeStyle = colorStyles[i];
+                    // Crest mode: half-length grows with the bucket's intensity — long
+                    // swell draws longer crests than short chop.
+                    var half = crest * (0.5 + 0.5 * i / (colorStyles.length - 1));
                     bucket.forEach(function (particle) {
-                        g.moveTo(particle.x, particle.y);
-                        g.lineTo(particle.xt, particle.yt);
+                        if (crest) {
+                            // Oriented dash perpendicular to travel, through the midpoint:
+                            // a wave crest marching in the propagation direction.
+                            var dx = particle.xt - particle.x, dy = particle.yt - particle.y;
+                            var len = Math.sqrt(dx * dx + dy * dy);
+                            if (len > 0) {
+                                var ux = -dy / len * half, uy = dx / len * half;
+                                var mx = (particle.x + particle.xt) / 2;
+                                var my = (particle.y + particle.yt) / 2;
+                                g.moveTo(mx - ux, my - uy);
+                                g.lineTo(mx + ux, my + uy);
+                            }
+                        }
+                        else {
+                            g.moveTo(particle.x, particle.y);
+                            g.lineTo(particle.xt, particle.yt);
+                        }
                         particle.x = particle.xt;
                         particle.y = particle.yt;
                     });
@@ -852,12 +871,13 @@
     var WAVE_CREDIT = "GFS-Wave 0.25&deg; &nbsp;|&nbsp; WAVEWATCH III / NCEP / NWS";
     var WAVE_DATE_LABEL = "Data: GFS-Wave (WW3), ";
     function seconds(v) { return v.toFixed(1) + " s"; }
-    // Short chunky crest dashes marching in the propagation direction (nullschool's waves
-    // look), not streamlines: small maxAge + fast fade keep only the last few segments on
-    // screen. Magnitudes are periods (~5–20 s), so velocityScale is between the wind and
-    // current scales; long swell marches faster and brighter than short chop.
-    var WAVE_PARTICLES = {velocityScale: 1 / 12000, maxIntensity: 22, multiplier: 1.5,
-        lineWidth: 2.9, maxAge: 14, fade: 0.75};
+    // Wave crests, not wind traces (user spec against the nullschool zoom shot): each
+    // particle draws an oriented dash PERPENDICULAR to its travel (crestLength = max half-
+    // length in px; longer swell draws longer, brighter crests), creeping forward at 1/10th
+    // of the first cut's speed and dying fast (small maxAge + hard fade) — a dense flickering
+    // crest field with no trailing smear. Magnitudes are periods (~5–20 s).
+    var WAVE_PARTICLES = {velocityScale: 1 / 120000, maxIntensity: 22, multiplier: 3,
+        lineWidth: 2.5, maxAge: 12, fade: 0.6, crestLength: 4.5};
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
         "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
@@ -922,19 +942,14 @@
             scalar: {
                 file: "data/current-ocean-wave-height-gfswave-0.25.json",
                 alpha: Math.floor(0.58 * 255),
-                // nullschool's waves palette: calm navy abyss → steel blue → teal →
-                // sand → storm orange/red (matched against the user's reference shot).
+                // white → gray → teal (user spec, replacing the first cut's navy→orange):
+                // calm seas silvery, storm seas deep teal. The 0.58 alpha over the
+                // near-black sphere mutes the white end to a soft slate.
                 lut: segmentedLut([
-                    [0.0, [8, 12, 38]],
-                    [1.5, [28, 48, 112]],
-                    [3.0, [42, 94, 150]],
-                    [4.5, [65, 150, 170]],
-                    [6.0, [120, 195, 175]],
-                    [7.5, [190, 215, 150]],
-                    [9.0, [235, 200, 115]],
-                    [10.5, [235, 155, 65]],
-                    [12.0, [215, 100, 40]],
-                    [15.0, [165, 35, 20]]
+                    [0.0, [250, 250, 252]],
+                    [5.0, [150, 156, 168]],
+                    [10.0, [45, 125, 130]],
+                    [15.0, [5, 78, 88]]
                 ], 0, 15),
                 min: 0, max: 15,
                 scaleLabel: "0 &ndash; 15 m",
