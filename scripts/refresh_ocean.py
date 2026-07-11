@@ -5,7 +5,9 @@ Analysis & Forecast (GLOBAL_ANALYSISFORECAST_PHY_001_024) — the same source
 earth.nullschool.net uses for ocean currents.
 
 Products (see PRODUCTS):
-    currents      uo/vo surface currents, two-record u/v file
+    currents      uo/vo currents at 0.494 m (surface), two-record u/v file
+    currents110   uo/vo currents at 109.73 m — below the mixed layer, where the
+                  Equatorial Undercurrent and boundary-current cores live
     temperature   thetao sea water potential temperature (°C), single record
 
 Uses the official Copernicus Marine Toolbox, which needs credentials: locally
@@ -40,21 +42,30 @@ import numpy as np
 # params: grib2json header identities, one per variable. wind.js keys u/v records on
 # parameterCategory 2 / parameterNumber 2·3 and reads geometry only for scalars —
 # keep the rest honest.
+CURRENT_PARAMS = [{"parameterCategory": 2, "parameterCategoryName": "Currents",
+                   "parameterNumber": 2, "parameterNumberName": "U-component_of_current",
+                   "parameterUnit": "m.s-1"},
+                  {"parameterCategory": 2, "parameterCategoryName": "Currents",
+                   "parameterNumber": 3, "parameterNumberName": "V-component_of_current",
+                   "parameterUnit": "m.s-1"}]
+# depth: [minimum_depth, maximum_depth] bracketing exactly one of the store's 50 levels
+# (0.494, 1.54, … 92.3, 109.73, 130.7, … 5727.9 m).
 PRODUCTS = {
     "currents": {
         "dataset_id": "cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m",
-        "variables": ["uo", "vo"],
+        "variables": ["uo", "vo"], "depth": [0, 1],
         "out": "current-ocean-currents-cmems-0.33.json",
-        "params": [{"parameterCategory": 2, "parameterCategoryName": "Currents",
-                    "parameterNumber": 2, "parameterNumberName": "U-component_of_current",
-                    "parameterUnit": "m.s-1"},
-                   {"parameterCategory": 2, "parameterCategoryName": "Currents",
-                    "parameterNumber": 3, "parameterNumberName": "V-component_of_current",
-                    "parameterUnit": "m.s-1"}],
+        "params": CURRENT_PARAMS,
+    },
+    "currents110": {
+        "dataset_id": "cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m",
+        "variables": ["uo", "vo"], "depth": [100, 120],  # only the 109.73 m level
+        "out": "current-ocean-currents-110m-cmems-0.33.json",
+        "params": CURRENT_PARAMS,
     },
     "temperature": {
         "dataset_id": "cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m",
-        "variables": ["thetao"],
+        "variables": ["thetao"], "depth": [0, 1],
         "out": "current-ocean-temp-cmems-0.33.json",
         "params": [{"parameterCategory": 4, "parameterCategoryName": "Sub-surface properties",
                     "parameterNumber": 18, "parameterNumberName": "Sea_water_potential_temperature",
@@ -64,23 +75,46 @@ PRODUCTS = {
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "data")
 
 
+def coarsen(full):
+    """
+    1/12° → 1/3°: sample every 4th point, but where the sampled point is land (NaN),
+    fall back to the mean of the surrounding 5×5 full-res window. A plain stride marks
+    a 1/3° cell "land" whenever its exact sample point is, giving the sea a land mask
+    a whole cell fatter than the vector coastline — charcoal staircase blocks jutting
+    into the sea (user bug report). The window fill pulls the data's coast to within
+    one 1/12° cell of the real one; the land fill and coastline stroke hide the rest.
+    """
+    sampled = full[::4, ::4]
+    pad = np.pad(full, 2, constant_values=np.nan)
+    total = np.zeros(sampled.shape)
+    count = np.zeros(sampled.shape)
+    for dy in range(5):
+        for dx in range(5):
+            shifted = pad[dy:dy + full.shape[0]:4, dx:dx + full.shape[1]:4]
+            ok = np.isfinite(shifted)
+            total[ok] += shifted[ok]
+            count[ok] += 1
+    filled = np.where(count > 0, total / np.maximum(count, 1), np.nan)
+    return np.where(np.isnan(sampled), filled, sampled)
+
+
 def fetch(product, day):
-    """Latest daily mean ≤ day from the credentialed 1/12° store, strided to 1/3°."""
+    """Latest daily mean ≤ day from the credentialed 1/12° store, coarsened to 1/3°."""
     import copernicusmarine
     ds = copernicusmarine.open_dataset(
         dataset_id=product["dataset_id"], variables=product["variables"],
-        minimum_depth=0, maximum_depth=1)  # only the 0.494 m surface bin
+        minimum_depth=product["depth"][0], maximum_depth=product["depth"][1])
     idx = int(np.searchsorted(ds.time.values, day + np.timedelta64(1, "h"))) - 1
     if idx < 0:
         sys.exit("no CMEMS data on or before %s" % day)
     when = ds.time.values[idx]
     sel = ds.isel(time=idx, depth=0)
     # 1/12° is 4320x2041; every 4th point lands exactly on the 1/3° grid (2040 % 4 == 0)
-    fields = [sel[v].values[::4, ::4] for v in product["variables"]]
-    return fields, sel.latitude.values[::4], sel.longitude.values[::4], when
+    fields = [coarsen(sel[v].values) for v in product["variables"]]
+    return fields, sel.latitude.values[::4], sel.longitude.values[::4], when, float(sel.depth.values)
 
 
-def record(values, lat, lon, when, param):
+def record(values, lat, lon, when, depth, param):
     ny, nx = values.shape
     dx = 360.0 / nx
     dy = (float(lat[-1]) - float(lat[0])) / (ny - 1)
@@ -90,7 +124,7 @@ def record(values, lat, lon, when, param):
         "refTime": str(when)[:10] + "T00:00:00.000Z",
         "forecastTime": 0,
         "surface1Type": 160, "surface1TypeName": "Depth below sea level",
-        "surface1Value": 0.494,
+        "surface1Value": round(depth, 3),
         "gridDefinitionTemplate": 0, "numberPoints": nx * ny, "shape": 6,
         "scanMode": 0, "nx": nx, "ny": ny,
         "lo1": float(lon[0]), "la1": float(lat[-1]),          # north-first origin
@@ -109,8 +143,8 @@ def main():
                         datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
     print("fetching CMEMS %s (%s) via Copernicus Marine Toolbox…" % (name, day))
-    fields, lat, lon, when = fetch(product, day)
-    out = [record(f[::-1], lat, lon, when, p)  # [::-1]: store is south-first; wind.js
+    fields, lat, lon, when, depth = fetch(product, day)
+    out = [record(f[::-1], lat, lon, when, depth, p)  # [::-1]: store is south-first; wind.js
            for f, p in zip(fields, product["params"])]  # expects scan mode 0 (north-first)
 
     out_path = os.path.abspath(os.path.join(DATA_DIR, product["out"]))
