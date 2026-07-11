@@ -119,7 +119,10 @@ eyewall is accepted in exchange for the luminous long-streamline look.)
 
 `public/data/current-wind-surface-level-gfs-0.25.json` holds GFS 10 m surface wind (u/v,
 0.25°×0.25°, values rounded to 0.1 m/s; ~9.2 MB raw / ~2.5 MB gzipped by Vercel) in grib2json
-format. **Last refreshed: GFS analysis 2026-07-10 00:00 UTC.** Upgraded 1° → 0.5° → 0.25°
+format. **Last refreshed: GFS analysis 2026-07-11 12:00 UTC (all seven GFS datasets, one
+cycle).** Note the data is a static snapshot committed to the repo — it only advances when
+`refresh_wind.py` runs; the planned GitHub Action (see Next steps) is what will make "most
+recent by default" true unattended. Upgraded 1° → 0.5° → 0.25°
 (nullschool's resolution) on 2026-07-10 for aesthetic parity; before that it was the 2014-01-31
 sample shipped with cambecc/earth. The HUD's "Data:" line always shows the loaded snapshot's
 timestamp.
