@@ -4,3 +4,4 @@ node_modules
 .claude/settings.local.json
 CLAUDE.md
 __pycache__/
+.env/
