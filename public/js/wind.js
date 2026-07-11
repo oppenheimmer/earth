@@ -277,7 +277,8 @@
         }
         else {
             v = scalarGrid && scalarGrid.interpolate(λ, φ);
-            if (v === null || v === undefined) return TRANSPARENT_BLACK;
+            // Ocean layers render dataless spots like the landmass, not as holes.
+            if (v === null || v === undefined) return landFill ? NO_DATA_GRAY : TRANSPARENT_BLACK;
         }
         var t = (v - overlaySpec.min) / (overlaySpec.max - overlaySpec.min);
         var c = overlaySpec.lut[Math.max(0, Math.min(255, Math.round(t * 255)))];
@@ -530,7 +531,7 @@
                                 wind = distort(λ, φ, x, y, velocityScale, wind);
                                 color = overlayColorAt(λ, φ, scalar);
                             }
-                            else if (overlaySpec && overlaySpec.fromMagnitude) {
+                            else if (landFill) {
                                 // Dataless water on an ocean layer (Caspian, coastal grid
                                 // holes): render like the landmass, not as a black hole.
                                 color = NO_DATA_GRAY;
@@ -615,7 +616,7 @@
                 if (coord && isFinite(coord[0])) {
                     var wind = grid.interpolate(coord[0], coord[1]);
                     var color = wind ? overlayColorAt(coord[0], coord[1], wind[2]) :
-                        overlaySpec && overlaySpec.fromMagnitude ? NO_DATA_GRAY : null;
+                        landFill ? NO_DATA_GRAY : null;
                     if (color) {
                         var k = (j * w + i) * 4;
                         data[k] = color[0];
@@ -787,12 +788,7 @@
             if (v !== null) parts.push(overlaySpec.format(v));
         }
         var wind = grid.interpolate(coord[0], coord[1]);
-        if (wind) {
-            // A fromMagnitude layer's flow *is* the displayed quantity (e.g. ocean
-            // current in m/s); km/h wind only makes sense for the atmosphere layers.
-            parts.push(overlaySpec && overlaySpec.fromMagnitude ?
-                overlaySpec.format(wind[2]) : (wind[2] * 3.6).toFixed(0) + " km/h");
-        }
+        if (wind) parts.push(flowFormat(wind[2]));
         setLocation(parts.length ?
             parts.join(" · ") + " @ " + formatCoordinates(coord[0], coord[1]) :
             formatCoordinates(coord[0], coord[1]));
@@ -813,6 +809,17 @@
     }
 
     var SURFACE_WIND = "data/current-wind-surface-level-gfs-0.25.json";
+    // Shared by the Ocean layers: CMEMS currents drive the particles everywhere (as surface
+    // wind does for the Atmosphere scalar layers), and the readout speaks m/s, not km/h.
+    var OCEAN_CURRENTS = "data/current-ocean-currents-cmems-0.33.json";
+    var OCEAN_CREDIT = "CMEMS &#8531;&deg; &nbsp;|&nbsp; Copernicus Marine Service";
+    var OCEAN_DATE_LABEL = "Data: CMEMS daily mean, ";
+    // Currents peak ~1.5 m/s vs ~100 m/s wind: particles need a much larger velocity
+    // scale to visibly flow, and trail brightness saturates early (0.7 m/s, cambecc's
+    // OSCAR value). Matched to nullschool by user comparison: moderately dense,
+    // slightly-thicker-than-wind strokes, faster motion (was 1/2500 · ×7 · 1.2 px).
+    var OCEAN_PARTICLES = {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7};
+    function metersPerSecond(v) { return v.toFixed(2) + " m/s"; }
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
         "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
@@ -841,15 +848,10 @@
             scaleLabel: "-40 &ndash; 35 &deg;C",
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
         }},
-        "ocean": {file: "data/current-ocean-currents-cmems-0.33.json", label: "Ocean Currents @ Surface",
-            credit: "CMEMS &#8531;&deg; &nbsp;|&nbsp; Copernicus Marine Service",
-            dateLabel: "Data: CMEMS daily mean, ",
+        "ocean": {file: OCEAN_CURRENTS, label: "Ocean Currents @ Surface",
+            credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true,  // charcoal continents above the overlay, nullschool-style
-            // Currents peak ~1.5 m/s vs ~100 m/s wind: particles need a much larger velocity
-            // scale to visibly flow, and trail brightness saturates early (0.7 m/s, cambecc's
-            // OSCAR value). Matched to nullschool by user comparison: moderately dense,
-            // slightly-thicker-than-wind strokes, faster motion (was 1/2500 · ×7 · 1.2 px).
-            particles: {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7},
+            particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
             scalar: {
                 fromMagnitude: true,  // color by current speed itself — no second dataset
                 // Dimmer than the atmosphere layers: the near-black sphere bleeds through,
@@ -866,12 +868,27 @@
                 ], 0, 1.5),
                 min: 0, max: 1.5,
                 scaleLabel: "0 &ndash; 1.5 m/s",
-                format: function (v) { return v.toFixed(2) + " m/s"; }
+                format: metersPerSecond
+            }},
+        "sst": {file: OCEAN_CURRENTS, label: "Sea Water Temperature @ Surface",
+            credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
+            landFill: true,
+            particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
+            scalar: {
+                file: "data/current-ocean-temp-cmems-0.33.json",
+                // Same bwr diverging scheme as the Atmosphere temperature layer, over
+                // 0–50 °C (user's spec). thetao is already °C. Values outside the domain
+                // pin to the end colors — the LUT index is clamped in overlayColorAt.
+                lut: colormapLut(bwrInterpolator),
+                min: 0, max: 50,
+                scaleLabel: "0 &ndash; 50 &deg;C",
+                format: function (v) { return v.toFixed(1) + " °C"; }
             }}
     };
     var DEFAULT_LAYER = "surface";
     var DEFAULT_CREDIT = "GFS 0.25&deg; &nbsp;|&nbsp; NCEP / US National Weather Service";
     var DEFAULT_PARTICLES = {velocityScale: VELOCITY_SCALE, maxIntensity: MAX_INTENSITY};
+    var KMH = function (v) { return (v * 3.6).toFixed(0) + " km/h"; };  // default flow readout
 
     var currentCancel = {requested: false};
     var recomputeTimer = null;
@@ -880,6 +897,7 @@
     var overlaySpec = null;   // the current layer's scalar spec, or null (= wind-speed overlay)
     var particleOpts = DEFAULT_PARTICLES;  // the current layer's animation tuning
     var landFill = false;     // charcoal land above the overlay (ocean layers)
+    var flowFormat = KMH;     // click-readout format for the particle flow's speed
 
     function cancelWork() {
         currentCancel.requested = true;
@@ -957,6 +975,7 @@
             scalarGrid = results.length > 1 ? buildScalarGrid(results[1]) : null;
             particleOpts = layer.particles || DEFAULT_PARTICLES;
             landFill = !!layer.landFill;
+            flowFormat = layer.flowFormat || KMH;
             drawScaleBar();
             document.getElementById("data-label").innerHTML = layer.credit || DEFAULT_CREDIT;
             document.getElementById("data-date").textContent =
