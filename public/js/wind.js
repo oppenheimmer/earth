@@ -836,10 +836,25 @@
         return t < 0.5 ? "rgb(" + c + "," + c + ",255)" : "rgb(255," + c + "," + c + ")";
     }
 
-    var SURFACE_WIND = "data/current-wind-surface-level-gfs-0.25.json";
+    // Data/code split (2026-07-12): the current-* weather JSONs are NOT in git — the
+    // refresh scripts write them to public/data/ (git-ignored) for local dev, and CI
+    // uploads them to a public Cloudflare R2 bucket for the deployed site. Static
+    // topologies (earth-topo, countries) stay in the repo and always load relative.
+    // Resolution order: #data=<url> hash override (for testing a bucket before wiring
+    // it in) → local files when served from localhost/file: → the R2 public URL.
+    var R2_DATA_ROOT = "https://YOUR-R2-PUBLIC-URL/";  // ← set to the bucket's public base URL
+    var DATA_ROOT = (function () {
+        var override = new URLSearchParams(location.hash.slice(1)).get("data");
+        if (override) return override.replace(/\/?$/, "/");
+        var local = /^(localhost|127\.|\[::1\])/.test(location.hostname) ||
+            location.protocol === "file:";
+        return local ? "data/" : R2_DATA_ROOT;
+    })();
+
+    var SURFACE_WIND = DATA_ROOT + "current-wind-surface-level-gfs-0.25.json";
     // Shared by the Ocean layers: CMEMS currents drive the particles everywhere (as surface
     // wind does for the Atmosphere scalar layers), and the readout speaks m/s, not km/h.
-    var OCEAN_CURRENTS = "data/current-ocean-currents-cmems-0.25.json";
+    var OCEAN_CURRENTS = DATA_ROOT + "current-ocean-currents-cmems-0.25.json";
     var OCEAN_CREDIT = "CMEMS 0.25&deg; &nbsp;|&nbsp; Copernicus Marine Service";
     var OCEAN_DATE_LABEL = "Data: CMEMS daily mean, ";
     // Currents peak ~1.5 m/s vs ~100 m/s wind: particles need a much larger velocity
@@ -871,7 +886,7 @@
     // One combined map (user spec, like nullschool): height colormap background + direction/
     // period crest dashes. The flow file's vectors point in the propagation direction and
     // their magnitude is the PEAK PERIOD IN SECONDS, so the click readout speaks "m · s".
-    var WAVE_FLOW = "data/current-ocean-waves-gfswave-0.25.json";
+    var WAVE_FLOW = DATA_ROOT + "current-ocean-waves-gfswave-0.25.json";
     var WAVE_CREDIT = "GFS-Wave 0.25&deg; &nbsp;|&nbsp; WAVEWATCH III / NCEP / NWS";
     var WAVE_DATE_LABEL = "Data: GFS-Wave (WW3), ";
     function seconds(v) { return v.toFixed(1) + " s"; }
@@ -889,11 +904,11 @@
         lineWidth: 2.5, maxAge: 20, fade: 0.72, crestLength: 4.5, brightnessFloor: 40};
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
-        "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
-        "500hpa": {file: "data/current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"},
-        "10hpa": {file: "data/current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
+        "1000hpa": {file: DATA_ROOT + "current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
+        "500hpa": {file: DATA_ROOT + "current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"},
+        "10hpa": {file: DATA_ROOT + "current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
         "temperature": {file: SURFACE_WIND, label: "Temperature @ Surface", scalar: {
-            file: "data/current-temp-surface-level-gfs-0.25.json",
+            file: DATA_ROOT + "current-temp-surface-level-gfs-0.25.json",
             // bwr diverging, domain -10–45 °C (user spec, was ±50): the populated range
             // gets the color stretch; beyond the endpoints pins to the end colors via
             // the clamped LUT index. White midpoint sits at 17.5 °C.
@@ -903,14 +918,14 @@
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
         }},
         "rh": {file: SURFACE_WIND, label: "Rel. Humidity @ Surface", scalar: {
-            file: "data/current-rh-surface-level-gfs-0.25.json",
+            file: DATA_ROOT + "current-rh-surface-level-gfs-0.25.json",
             lut: colormapLut(d3.interpolateBuPu),  // Purples → BuPu for better contrast (user preference)
             min: 0, max: 100,
             scaleLabel: "0 &ndash; 100 %",
             format: function (v) { return v.toFixed(0) + " %"; }
         }},
         "dew": {file: SURFACE_WIND, label: "Dew Point @ Surface", scalar: {
-            file: "data/current-dewpoint-surface-level-gfs-0.25.json",
+            file: DATA_ROOT + "current-dewpoint-surface-level-gfs-0.25.json",
             lut: colormapLut(d3.interpolatePuBuGn),
             min: 233.15, max: 308.15,  // -40 – 35 °C
             scaleLabel: "-40 &ndash; 35 &deg;C",
@@ -923,7 +938,7 @@
             scalar: CURRENT_SPEED_SCALAR},
         // 25.21 m: near the base of the tropical mixed layer — the flow starts diverging
         // from the wind-driven surface drift (user pick, was 109.73 m).
-        "ocean25": {file: "data/current-ocean-currents-25m-cmems-0.25.json",
+        "ocean25": {file: DATA_ROOT + "current-ocean-currents-25m-cmems-0.25.json",
             label: "Ocean Currents @ 25 m",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true,
@@ -934,7 +949,7 @@
             landFill: true,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
             scalar: {
-                file: "data/current-ocean-temp-cmems-0.25.json",
+                file: DATA_ROOT + "current-ocean-temp-cmems-0.25.json",
                 // Same bwr diverging scheme as the Atmosphere temperature layer. Upper
                 // limit pinned at 35 °C (user's spec — the ocean never gets hotter, so a
                 // 50 °C ceiling wasted the red half). thetao is already °C. Values outside
@@ -949,7 +964,7 @@
             landFill: true,
             particles: WAVE_PARTICLES, flowFormat: seconds,
             scalar: {
-                file: "data/current-ocean-wave-height-gfswave-0.25.json",
+                file: DATA_ROOT + "current-ocean-wave-height-gfswave-0.25.json",
                 alpha: Math.floor(0.58 * 255),
                 // Significant wave height, blue → light blue → yellow → orange → saffron
                 // (user spec): calm seas deep blue, 15 m saffron; higher values clip to

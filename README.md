@@ -21,8 +21,9 @@ A minimal replica of the meteorological visualization from
 ├── scripts/
 │   ├── refresh_wind.py          # GFS data refresh, pygrib-based (verified working)
 │   ├── refresh_ocean.py         # CMEMS ocean-current refresh via copernicusmarine toolbox (creds: .env/)
-│   └── refresh_waves.py         # GFS-Wave (WAVEWATCH III) waves refresh via NOMADS, anonymous
-└── public/                      # the entire deployable site
+│   ├── refresh_waves.py         # GFS-Wave (WAVEWATCH III) waves refresh via NOMADS, anonymous
+│   └── upload_data.sh           # ships public/data/current-*.json to the Cloudflare R2 bucket (creds: .env/r2)
+└── public/                      # the deployable site (code + static assets only)
     ├── index.html               # four stacked canvases (#map, #overlay, #lines, #animation) + burger-menu HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
     ├── js/wind.js               # the whole engine (~600 lines, no build step)
@@ -31,22 +32,22 @@ A minimal replica of the meteorological visualization from
     │   ├── d3.v7.min.js         # vendored D3 v7
     │   └── topojson-client.min.js
     └── data/
-        ├── current-wind-surface-level-gfs-0.25.json  # GFS 10 m u/v wind, 0.25°×0.25°, grib2json format (~9.2 MB)
-        ├── current-wind-1000hpa-gfs-0.25.json        # GFS u/v wind @ 1000 hPa (~9.2 MB)
-        ├── current-wind-500hpa-gfs-0.25.json         # GFS u/v wind @ 500 hPa (~9.5 MB)
-        ├── current-wind-10hpa-gfs-0.25.json          # GFS u/v wind @ 10 hPa (~10 MB)
-        ├── current-temp-surface-level-gfs-0.25.json  # GFS 2 m temperature (~6 MB)
-        ├── current-rh-surface-level-gfs-0.25.json    # GFS 2 m relative humidity (~5 MB)
-        ├── current-dewpoint-surface-level-gfs-0.25.json  # GFS 2 m dew point (~6 MB)
-        ├── current-ocean-currents-cmems-0.25.json    # CMEMS current u/v @ 0.494 m, ¼°, daily mean (~11 MB)
-        ├── current-ocean-currents-25m-cmems-0.25.json   # CMEMS current u/v @ 25.211 m (~11 MB)
-        ├── current-ocean-temp-cmems-0.25.json        # CMEMS sea water temperature (thetao, °C), ¼° (~6 MB)
-        ├── current-ocean-waves-gfswave-0.25.json     # GFS-Wave propagation u/v, |v| = peak period s (~10 MB)
-        ├── current-ocean-wave-height-gfswave-0.25.json  # GFS-Wave significant wave height, m (~5 MB)
-        ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
+        ├── current-*.json       # 12 weather datasets — GIT-IGNORED since 2026-07-12 (data/code
+        │                        #   split): refresh scripts write them here for local dev,
+        │                        #   upload_data.sh ships them to Cloudflare R2 for production;
+        │                        #   js/wind.js picks local vs R2 by hostname (see Data section)
+        ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m) — in git
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
 ```
+
+The 12 weather files and their shapes (all grib2json format, ~97 MB total): 4× GFS u/v wind
+(`current-wind-{surface-level,1000hpa,500hpa,10hpa}-gfs-0.25.json`, ~9–10 MB each), 3× GFS 2 m
+scalars (`current-{temp,rh,dewpoint}-surface-level-gfs-0.25.json`, ~5–6 MB), 2× CMEMS current
+u/v at 0.494 m / 25.211 m (`current-ocean-currents{,-25m}-cmems-0.25.json`, ~11 MB), CMEMS
+thetao (`current-ocean-temp-cmems-0.25.json`, ~6 MB), GFS-Wave propagation u/v with |v| =
+peak period (`current-ocean-waves-gfswave-0.25.json`, ~10 MB) and significant wave height
+(`current-ocean-wave-height-gfswave-0.25.json`, ~5 MB).
 
 ## How it works (rendering pipeline in `js/wind.js`)
 
@@ -124,10 +125,26 @@ eyewall is accepted in exchange for the luminous long-streamline look.)
 
 ## Data
 
-`public/data/current-wind-surface-level-gfs-0.25.json` holds GFS 10 m surface wind (u/v,
-0.25°×0.25°, values rounded to 0.1 m/s; ~9.2 MB raw / ~2.5 MB gzipped by Vercel) in grib2json
+**Data/code split (2026-07-12)**: the `current-*` weather JSONs are **not in git**. The
+refresh scripts still write them to `public/data/` (now git-ignored) so local dev works
+exactly as before; production serves them from a **Cloudflare R2 bucket** instead. In
+`js/wind.js`, every weather-file URL goes through `DATA_ROOT`, resolved once at load:
+a `#data=<url>` hash override (for testing a bucket before wiring it in — e.g.
+`#layer=waves&data=https://bucket.example/`) → local `data/` when served from
+localhost/127.x/file: → `R2_DATA_ROOT` (a constant at the top of the orchestration
+section; **set it to the bucket's public base URL after creating the bucket**). The three
+topology files stay in the repo and always load relative — they're static assets, not data.
+`scripts/upload_data.sh` ships the 12 files to R2 (S3-compatible API via the AWS CLI,
+`--cache-control max-age=1800`; Cloudflare's edge gzips JSON on the fly). Consequences:
+data refreshes no longer create commits, force-pushes, or Vercel deploys — the repo carries
+no history churn and Vercel only redeploys on code pushes. Both paths verified headlessly:
+localhost serving from `data/`, and a cross-origin CORS stand-in bucket via `#data=`.
+Full R2 + Vercel + GitHub Actions recipe: `~/Documents/earth-vercel-deploy.md`.
+
+`current-wind-surface-level-gfs-0.25.json` holds GFS 10 m surface wind (u/v,
+0.25°×0.25°, values rounded to 0.1 m/s; ~9.2 MB raw / ~2.5 MB gzipped at the edge) in grib2json
 format. **Last refreshed: GFS analysis 2026-07-11 12:00 UTC (all seven GFS datasets, one
-cycle).** Note the data is a static snapshot committed to the repo — it only advances when
+cycle).** Note the data is a static snapshot — it only advances when
 `refresh_wind.py` runs; the planned GitHub Action (see Next steps) is what will make "most
 recent by default" true unattended. Upgraded 1° → 0.5° → 0.25°
 (nullschool's resolution) on 2026-07-10 for aesthetic parity; before that it was the 2014-01-31
@@ -402,10 +419,12 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
    - NB the venv (pygrib/PIL/numpy/copernicusmarine) lives in the session scratchpad under
      /tmp — likely wiped by reboot; recreate with `python3 -m venv gribenv && ./gribenv/bin/pip
      install pygrib pillow numpy copernicusmarine`.
-   - Automate data refresh (e.g., a GitHub Action running `scripts/refresh_wind.py` +
-     `refresh_waves.py` (anonymous) and `refresh_ocean.py` (CMEMS secrets) every 6 h
-     and redeploying) — otherwise the deployed snapshot goes stale from deploy day.
-     A full step-by-step Vercel + Actions guide (project `earth`, secrets handling,
+   - Automate data refresh: a GitHub Action running `scripts/refresh_wind.py` +
+     `refresh_waves.py` (anonymous) and `refresh_ocean.py` (CMEMS secrets) every 6 h,
+     then `scripts/upload_data.sh` straight to the R2 bucket — **no commits, no Vercel
+     redeploys** (data/code split, 2026-07-12). Remaining one-time setup on the user's
+     side: create the R2 bucket + public URL, set `R2_DATA_ROOT` in `wind.js`, add the
+     five Actions secrets. The full step-by-step guide (R2 bucket, CORS, secrets,
      ready-to-paste workflow YAML) lives at `~/Documents/earth-vercel-deploy.md`
      (deliberately outside the repo, 2026-07-12).
    - Touch pinch-zoom (only wheel zoom is implemented). A read-only URL-hash initial view
@@ -435,17 +454,30 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   unlike currents). If both ocean branches instead modify the monolithic `wind.js`
   independently, the second merge will be painful; after the refactor each feature branch
   touches only its own layer module.
-- **Keep data refreshes out of feature branches.** The ~9 MB wind JSON updates on its own
-  cadence (eventually 6-hourly via GitHub Action); those commits land directly on `main`.
-  Mixing snapshot churn into feature history bloats it and guarantees merge noise. If the
-  repo eventually carries one large JSON per layer refreshed several times a day, repo size
-  will balloon — consider having the refresh Action deploy data to Vercel without committing
-  it (a later problem).
+- **Data refreshes never touch git at all** (since the 2026-07-12 data/code split — this
+  resolved the old "keep data refreshes out of feature branches" rule and the repo-size
+  worry in one move): the weather JSONs are git-ignored, refresh scripts update the local
+  copies, and `upload_data.sh` ships them to the R2 bucket. Feature branches and `main`
+  carry code only. NB: history from before the split still contains old data blobs; a
+  one-time `git filter-repo` pass could shrink the clone if that ever matters.
 - **Avoid** a `develop` branch or gitflow (pure ceremony at this scale) and long-lived
   parallel feature branches — the features share the engine, so divergence is the main risk
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `main` (data/code split — Cloudflare R2):
+
+- **Weather data out of git**: the 12 `current-*.json` files are git-ignored and untracked
+  (still written to `public/data/` by the refresh scripts for local dev). Production fetches
+  them from a Cloudflare R2 bucket: `wind.js` routes every weather URL through `DATA_ROOT`
+  (`#data=` hash override → local on localhost → `R2_DATA_ROOT` constant, **placeholder until
+  the bucket exists**). Topologies stay in the repo. New `scripts/upload_data.sh` (S3 API,
+  AWS CLI, cache-control 1800 s). Refreshes now cause zero commits/force-pushes/redeploys.
+- Verified headlessly on both paths: localhost → local files; `#data=http://127.0.0.1:8421/`
+  → a CORS-enabled stand-in bucket on a second origin (temperature layer, flow + scalar).
+- Deployment guide `~/Documents/earth-vercel-deploy.md` rewritten around R2 (bucket setup,
+  public URL + CORS, five Actions secrets, upload workflow).
 
 2026-07-12, on `main` (wave-dash lifecycle):
 

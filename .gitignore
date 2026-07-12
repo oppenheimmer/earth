@@ -5,3 +5,6 @@ node_modules
 CLAUDE.md
 __pycache__/
 .env/
+# Weather data is not versioned: refresh scripts write it here for local dev,
+# scripts/upload_data.sh ships it to the Cloudflare R2 bucket for production.
+public/data/current-*.json
