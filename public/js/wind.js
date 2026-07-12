@@ -87,14 +87,17 @@
     }
 
     /** Near-neutral bright styles for particle trails plus indexFor(mag) to pick a bucket. */
-    function windIntensityColorScale(step, maxWind) {
+    function windIntensityColorScale(step, maxWind, floor) {
         var result = [];
-        for (var j = 130; j <= 255; j += step) {  // 85 in the original; high floor keeps slow-wind trails bright
+        // Brightness floor: 130 keeps slow-wind trails bright (85 in the original); the wave
+        // layer drops it so slow short chop is dim and fast long swell is markedly brighter.
+        floor = floor || 130;
+        for (var j = floor; j <= 255; j += step) {
             // Near-neutral strokes: the hue comes from the overlay bleeding through the alpha
             // (white over red reads pink, over green pale green). A stronger green tint muddied
             // the red eyewall into brown. Alpha falls with speed (0.70 slow → 0.50 fast) so calm
             // regions get bright distinct traces while storm cores can't pile up into mush.
-            var t = (j - 130) / (255 - 130);
+            var t = (j - floor) / (255 - floor);
             var alpha = (0.70 - 0.20 * t).toFixed(2);
             result.push("rgba(" + Math.round(j * 0.90) + ", " + j + ", " + Math.round(j * 0.92) + ", " + alpha + ")");
         }
@@ -645,7 +648,8 @@
 
     function animate(field, cancel) {
         var bounds = field.bounds;
-        var colorStyles = windIntensityColorScale(INTENSITY_SCALE_STEP, particleOpts.maxIntensity);
+        var colorStyles = windIntensityColorScale(INTENSITY_SCALE_STEP, particleOpts.maxIntensity,
+            particleOpts.brightnessFloor);
         var buckets = colorStyles.map(function () { return []; });
         var dpr = window.devicePixelRatio || 1;
         // Trail shape is a per-layer choice: long fluid streamlines (winds, currents) vs
@@ -864,20 +868,22 @@
         format: metersPerSecond
     };
     // Waves: GFS-Wave (WAVEWATCH III) via the same NOMADS filter as the atmosphere layers.
-    // One flow file drives both wave layers; its vectors point in the propagation direction
-    // and their magnitude is the PEAK PERIOD IN SECONDS — so the period overlay is just
-    // fromMagnitude, and the click readout speaks seconds.
+    // One combined map (user spec, like nullschool): height colormap background + direction/
+    // period crest dashes. The flow file's vectors point in the propagation direction and
+    // their magnitude is the PEAK PERIOD IN SECONDS, so the click readout speaks "m · s".
     var WAVE_FLOW = "data/current-ocean-waves-gfswave-0.25.json";
     var WAVE_CREDIT = "GFS-Wave 0.25&deg; &nbsp;|&nbsp; WAVEWATCH III / NCEP / NWS";
     var WAVE_DATE_LABEL = "Data: GFS-Wave (WW3), ";
     function seconds(v) { return v.toFixed(1) + " s"; }
     // Wave crests, not wind traces (user spec against the nullschool zoom shot): each
     // particle draws an oriented dash PERPENDICULAR to its travel (crestLength = max half-
-    // length in px; longer swell draws longer, brighter crests), creeping forward at 1/10th
-    // of the first cut's speed and dying fast (small maxAge + hard fade) — a dense flickering
-    // crest field with no trailing smear. Magnitudes are periods (~5–20 s).
-    var WAVE_PARTICLES = {velocityScale: 1 / 120000, maxIntensity: 22, multiplier: 3,
-        lineWidth: 2.5, maxAge: 12, fade: 0.6, crestLength: 4.5};
+    // length in px; longer swell draws longer crests), barely creeping — waves are localized
+    // and much slower than winds — and dying fast (small maxAge + hard fade), a dense
+    // flickering crest field with no trailing smear. Magnitudes are periods (~5–20 s);
+    // deep-water phase speed grows with period, so the low brightnessFloor makes faster
+    // waves visibly brighter than slow chop. Speed history: 1/12000 → ×0.10 → ×⅓ again.
+    var WAVE_PARTICLES = {velocityScale: 1 / 360000, maxIntensity: 22, multiplier: 3,
+        lineWidth: 2.5, maxAge: 12, fade: 0.6, crestLength: 4.5, brightnessFloor: 40};
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
         "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
@@ -935,37 +941,26 @@
                 scaleLabel: "0 &ndash; 35 &deg;C",
                 format: function (v) { return v.toFixed(1) + " °C"; }
             }},
-        "waves": {file: WAVE_FLOW, label: "Significant Wave Height",
+        "waves": {file: WAVE_FLOW, label: "Ocean Waves",
             credit: WAVE_CREDIT, dateLabel: WAVE_DATE_LABEL,
             landFill: true,
             particles: WAVE_PARTICLES, flowFormat: seconds,
             scalar: {
                 file: "data/current-ocean-wave-height-gfswave-0.25.json",
                 alpha: Math.floor(0.58 * 255),
-                // white → gray → teal (user spec, replacing the first cut's navy→orange):
-                // calm seas silvery, storm seas deep teal. The 0.58 alpha over the
-                // near-black sphere mutes the white end to a soft slate.
+                // Significant wave height, blue → light blue → yellow → orange → saffron
+                // (user spec): calm seas deep blue, 15 m saffron; higher values clip to
+                // saffron via the clamped LUT index.
                 lut: segmentedLut([
-                    [0.0, [250, 250, 252]],
-                    [5.0, [150, 156, 168]],
-                    [10.0, [45, 125, 130]],
-                    [15.0, [5, 78, 88]]
+                    [0.0, [12, 44, 132]],
+                    [4.0, [110, 175, 225]],
+                    [8.0, [240, 228, 110]],
+                    [11.5, [255, 165, 0]],
+                    [15.0, [255, 103, 31]]
                 ], 0, 15),
                 min: 0, max: 15,
                 scaleLabel: "0 &ndash; 15 m",
                 format: function (v) { return v.toFixed(1) + " m"; }
-            }},
-        "wavep": {file: WAVE_FLOW, label: "Peak Wave Period",
-            credit: WAVE_CREDIT, dateLabel: WAVE_DATE_LABEL,
-            landFill: true,
-            particles: WAVE_PARTICLES, flowFormat: seconds,
-            scalar: {
-                fromMagnitude: true,  // the flow file's magnitude IS the period (s)
-                alpha: Math.floor(0.58 * 255),
-                lut: colormapLut(d3.interpolateTurbo),  // rainbow steps like nullschool's period scale
-                min: 0, max: 25,
-                scaleLabel: "0 &ndash; 25 s",
-                format: seconds
             }}
     };
     var DEFAULT_LAYER = "surface";

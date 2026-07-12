@@ -208,16 +208,19 @@ meteorological "direction from" — verified against the Southern Ocean westerli
 the click readout speaks seconds, no third file. `current-ocean-wave-height-gfswave-0.25.json`
 is the HTSGW scalar. Both fields get a 5×5 NaN-dilation pass at native 0.25° (the wave
 model's land mask is a cell fatter than the vector coastline — same staircase bug as CMEMS,
-same cure). Two layers share the flow file: **Wave-Height** (`waves`) colors by significant
-wave height through a **white → gray → teal** ramp (0–15 m, user spec: silvery calm seas,
-deep-teal storm seas; replaced the first cut's navy→orange), **Wave-Period** (`wavep`)
-through d3.interpolateTurbo (0–25 s). The particles are **crest dashes, not trails** (user
-spec against a zoomed nullschool shot): `animate()` grew per-layer `maxAge`/`fade` and a
-`crestLength` mode that strokes an oriented dash PERPENDICULAR to travel through the segment
-midpoint — dense flickering crest rows creeping forward at 1/10th the first cut's speed
-(velocityScale 1/120000) and dying fast (maxAge 12, fade 0.6, multiplier 3, width 2.5;
-crest half-length 4.5 px scaled by the intensity bucket, so long swell draws longer,
-brighter crests).
+same cure). Since the third redesign round (user spec) there is **one combined Waves layer**
+(`waves`, like nullschool): the background colors by significant wave height through a
+**blue → light blue → yellow → orange → saffron** ramp (0–15 m; >15 m clips to saffron via
+the clamped LUT index), and the click readout speaks both fields ("4.2 m · 12.3 s"). The
+particles are **crest dashes, not trails** (user spec against a zoomed nullschool shot):
+`animate()` grew per-layer `maxAge`/`fade` and a `crestLength` mode that strokes an oriented
+dash PERPENDICULAR to travel through the segment midpoint — dense flickering crest rows
+**barely creeping** (velocityScale 1/360000 — waves are localized and far slower than winds;
+history 1/12000 → ×0.10 → ×⅓) and dying fast (maxAge 12, fade 0.6, multiplier 3, width 2.5;
+crest half-length 4.5 px scaled by the intensity bucket). `brightnessFloor: 40` widens the
+particle brightness ramp (default floor 130), so faster long-period swell draws markedly
+brighter crests than slow chop — deep-water phase speed grows with period, so
+period-brightness *is* speed-brightness.
 
 **CMEMS credentials**: `scripts/refresh_ocean.py` needs a Copernicus Marine account. The
 toolbox reads `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD` —
@@ -362,9 +365,8 @@ status line; page/HUD title is plain "earth", per user request). The burger butt
      hook, since the menu needs a click). Since 2026-07-12 the domains **stack vertically**
      (`#tabs` is a column; each tab header sits directly above its own `.tab-body`): the
      **Ocean tab** below Atmosphere holds **Current-Surface** (`data-layer="ocean"`),
-     **Current-25m** (`data-layer="ocean25"`), **Temperature** (`data-layer="sst"`),
-     **Wave-Height** (`data-layer="waves"`) and **Wave-Period** (`data-layer="wavep"`),
-     all live.
+     **Current-25m** (`data-layer="ocean25"`), **Temperature** (`data-layer="sst"`) and
+     **Waves** (`data-layer="waves"`, the combined height + direction/period map), all live.
    - Data source + snapshot date lines, the color-scale bar, the click-for-wind-speed
      readout, and credits — all IDs (`#scale`, `#data-date`, `#location`, `#status`)
      unchanged, so `wind.js` needed no edits; `#status` lives in the always-visible bar so
@@ -441,6 +443,18 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `main` (wave-layer redesign, third round — combined map):
+
+- **One Waves layer** — `wavep` removed; the single `waves` map combines the height colormap
+  with the direction/period crest dashes (nullschool-style), readout "m · s" on click.
+- **Height colormap → blue → light blue → yellow → orange → saffron** (user spec), 0–15 m,
+  higher values clipped to saffron; replaces white→gray→teal.
+- **Speed-scaled brightness** — `windIntensityColorScale` gained a per-layer brightness
+  floor (`brightnessFloor: 40` for waves vs default 130): faster (longer-period) waves draw
+  markedly brighter crests.
+- **Even slower march** — velocityScale 1/120000 → 1/360000; the crests barely move, as
+  waves should against winds.
 
 2026-07-12, on `main` (wave-layer redesign, user feedback on the first render):
 
