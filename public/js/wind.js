@@ -862,13 +862,14 @@
     // OSCAR value). Matched to nullschool by user comparison: moderately dense,
     // slightly-thicker-than-wind strokes, faster motion (was 1/2500 · ×7 · 1.2 px).
     var OCEAN_PARTICLES = {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7};
+    // Ocean overlays render dimmer than the atmosphere's OVERLAY_ALPHA: the near-black
+    // sphere bleeds through, deepening the calm-sea colors so the trails/crests read on top.
+    var OCEAN_ALPHA = Math.floor(0.58 * 255);
     function metersPerSecond(v) { return v.toFixed(2) + " m/s"; }
-    // One spec shared by every current-speed layer (surface, 110 m):
+    // One spec shared by every current-speed layer (surface, 25 m):
     var CURRENT_SPEED_SCALAR = {
         fromMagnitude: true,  // color by current speed itself — no second dataset
-        // Dimmer than the atmosphere layers: the near-black sphere bleeds through,
-        // deepening the calm-ocean blues so the bright trails read as the currents.
-        alpha: Math.floor(0.58 * 255),
+        alpha: OCEAN_ALPHA,
         // nullschool's ocean palette: deep blue abyss → green → sand → red jets
         lut: segmentedLut([
             [0.0, [10, 25, 68]],
@@ -892,14 +893,11 @@
     function seconds(v) { return v.toFixed(1) + " s"; }
     // Wave crests, not wind traces (user spec against the nullschool zoom shot): each
     // particle draws an oriented dash PERPENDICULAR to its travel (crestLength = max half-
-    // length in px; longer swell draws longer crests), barely creeping — waves are localized
-    // and much slower than winds — and dying fast (small maxAge + hard fade), a dense
-    // flickering crest field with no trailing smear. Magnitudes are periods (~5–20 s);
-    // deep-water phase speed grows with period, so the low brightnessFloor makes faster
-    // waves visibly brighter than slow chop. Speed history: 1/12000 → ×0.10 → ×⅓ again.
-    // maxAge 20 / fade 0.72 (was 12 / 0.6): dashes were blinking in and out too fast —
-    // a longer life and gentler per-frame fade give each crest a soft ease-in/out while
-    // the near-static march keeps them from smearing into streaks.
+    // length in px; longer swell draws longer crests). Magnitudes are periods (~5–20 s),
+    // and deep-water phase speed grows with period, so the low brightnessFloor makes
+    // faster waves visibly brighter than slow chop. The tiny velocityScale keeps the
+    // crests barely creeping (waves are localized and far slower than winds); maxAge/fade
+    // give each dash a soft ease-in/out with no trailing smear at that near-static speed.
     var WAVE_PARTICLES = {velocityScale: 1 / 360000, maxIntensity: 22, multiplier: 3,
         lineWidth: 2.5, maxAge: 20, fade: 0.72, crestLength: 4.5, brightnessFloor: 40};
     var LAYERS = {
@@ -965,7 +963,7 @@
             particles: WAVE_PARTICLES, flowFormat: seconds,
             scalar: {
                 file: DATA_ROOT + "current-ocean-wave-height-gfswave-0.25.json",
-                alpha: Math.floor(0.58 * 255),
+                alpha: OCEAN_ALPHA,
                 // Significant wave height, blue → light blue → yellow → orange → saffron
                 // (user spec): calm seas deep blue, 15 m saffron; higher values clip to
                 // saffron via the clamped LUT index.

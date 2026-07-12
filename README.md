@@ -26,7 +26,7 @@ A minimal replica of the meteorological visualization from
 └── public/                      # the deployable site (code + static assets only)
     ├── index.html               # four stacked canvases (#map, #overlay, #lines, #animation) + burger-menu HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
-    ├── js/wind.js               # the whole engine (~600 lines, no build step)
+    ├── js/wind.js               # the whole engine (~1150 lines, no build step)
     ├── js/menu.js               # burger-menu toggle, tab switching, layer-change dispatch (~40 lines)
     ├── libs/
     │   ├── d3.v7.min.js         # vendored D3 v7
@@ -420,13 +420,17 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
      /tmp — likely wiped by reboot; recreate with `python3 -m venv gribenv && ./gribenv/bin/pip
      install pygrib pillow numpy copernicusmarine`.
    - Automate data refresh: a GitHub Action running `scripts/refresh_wind.py` +
-     `refresh_waves.py` (anonymous) and `refresh_ocean.py` (CMEMS secrets) every 6 h,
-     then `scripts/upload_data.sh` straight to the R2 bucket — **no commits, no Vercel
-     redeploys** (data/code split, 2026-07-12). Remaining one-time setup on the user's
-     side: create the R2 bucket + public URL, set `R2_DATA_ROOT` in `wind.js`, add the
-     five Actions secrets. The full step-by-step guide (R2 bucket, CORS, secrets,
-     ready-to-paste workflow YAML) lives at `~/Documents/earth-vercel-deploy.md`
-     (deliberately outside the repo, 2026-07-12).
+     `refresh_waves.py` (anonymous) and `refresh_ocean.py` (CMEMS secrets), then
+     `scripts/upload_data.sh` straight to the R2 bucket — **no commits, no Vercel
+     redeploys** (data/code split, 2026-07-12). Cadence: **once daily by default**
+     (user spec, 2026-07-12 — matches CMEMS's actual update rate); the repo variable
+     `REFRESH_CADENCE=6h` switches all datasets to the old 6-hourly cadence without a
+     workflow edit (a gate job filters the 6-hourly cron firings). Remaining one-time
+     setup on the user's side: create the R2 bucket + public URL, set `R2_DATA_ROOT`
+     in `wind.js`, add the five Actions secrets (+ the optional cadence variable).
+     The full step-by-step guide (R2 bucket, CORS, secrets, ready-to-paste workflow
+     YAML) lives at `~/Documents/earth-vercel-deploy.md` (deliberately outside the
+     repo, 2026-07-12).
    - Touch pinch-zoom (only wheel zoom is implemented). A read-only URL-hash initial view
      already exists (`#rotate=λ,φ&zoom=k`, e.g. `#rotate=-128.5,-21.5&zoom=5` centers the
      typhoon; also the headless-testing hook) — writing the hash back on interaction like the
@@ -465,6 +469,21 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `main` (refresh cadence + quality pass + history cleanup):
+
+- **Daily refresh by default** (was 6-hourly, applies to all datasets): the workflow in
+  `~/Documents/earth-vercel-deploy.md` keeps a 6-hourly cron but a gate job only lets the
+  ~00:45 UTC firing through unless the GitHub repo **variable** `REFRESH_CADENCE=6h` is
+  set — toggling cadence is a settings-page change, no workflow edit.
+- **Quality pass over `wind.js`**: `OCEAN_ALPHA` constant replaces the repeated
+  `Math.floor(0.58 * 255)` in the ocean scalar specs; the wave-particle comment block
+  rewritten to describe the final behavior instead of accreted was/now changelog (which
+  lives here in Changes). Dead-code audit found none: every function and top-level
+  constant in `wind.js`/`menu.js` and every script import is referenced.
+- **History rewritten with `git filter-repo`** to drop the pre-split data blobs from
+  all commits (JSON packs tightly — `.git` went 49 → ~15 MB, not the raw ~100 MB/snapshot);
+  force-pushed. Old clones must be re-cloned; commit hashes before this point changed.
 
 2026-07-12, on `main` (data/code split — Cloudflare R2):
 
