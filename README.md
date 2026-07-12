@@ -19,27 +19,35 @@ A minimal replica of the meteorological visualization from
 ├── README.md
 ├── start.sh                     # local launcher: serves public/ on :8420 and opens browser
 ├── scripts/
-│   └── refresh_wind.py          # data refresh, pygrib-based (verified working)
-└── public/                      # the entire deployable site
+│   ├── refresh_wind.py          # GFS data refresh, pygrib-based (verified working)
+│   ├── refresh_ocean.py         # CMEMS ocean-current refresh via copernicusmarine toolbox (creds: .env/)
+│   ├── refresh_waves.py         # GFS-Wave (WAVEWATCH III) waves refresh via NOMADS, anonymous
+│   └── upload_data.sh           # ships public/data/current-*.json to the Cloudflare R2 bucket (creds: .env/r2)
+└── public/                      # the deployable site (code + static assets only)
     ├── index.html               # four stacked canvases (#map, #overlay, #lines, #animation) + burger-menu HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
-    ├── js/wind.js               # the whole engine (~600 lines, no build step)
+    ├── js/wind.js               # the whole engine (~1150 lines, no build step)
     ├── js/menu.js               # burger-menu toggle, tab switching, layer-change dispatch (~40 lines)
     ├── libs/
     │   ├── d3.v7.min.js         # vendored D3 v7
     │   └── topojson-client.min.js
     └── data/
-        ├── current-wind-surface-level-gfs-0.25.json  # GFS 10 m u/v wind, 0.25°×0.25°, grib2json format (~9.2 MB)
-        ├── current-wind-1000hpa-gfs-0.25.json        # GFS u/v wind @ 1000 hPa (~9.2 MB)
-        ├── current-wind-500hpa-gfs-0.25.json         # GFS u/v wind @ 500 hPa (~9.5 MB)
-        ├── current-wind-10hpa-gfs-0.25.json          # GFS u/v wind @ 10 hPa (~10 MB)
-        ├── current-temp-surface-level-gfs-0.25.json  # GFS 2 m temperature (~6 MB)
-        ├── current-rh-surface-level-gfs-0.25.json    # GFS 2 m relative humidity (~5 MB)
-        ├── current-dewpoint-surface-level-gfs-0.25.json  # GFS 2 m dew point (~6 MB)
-        ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m)
+        ├── current-*.json       # 12 weather datasets — GIT-IGNORED since 2026-07-12 (data/code
+        │                        #   split): refresh scripts write them here for local dev,
+        │                        #   upload_data.sh ships them to Cloudflare R2 for production;
+        │                        #   js/wind.js picks local vs R2 by hostname (see Data section)
+        ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m) — in git
         ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
 ```
+
+The 12 weather files and their shapes (all grib2json format, ~97 MB total): 4× GFS u/v wind
+(`current-wind-{surface-level,1000hpa,500hpa,10hpa}-gfs-0.25.json`, ~9–10 MB each), 3× GFS 2 m
+scalars (`current-{temp,rh,dewpoint}-surface-level-gfs-0.25.json`, ~5–6 MB), 2× CMEMS current
+u/v at 0.494 m / 25.211 m (`current-ocean-currents{,-25m}-cmems-0.25.json`, ~11 MB), CMEMS
+thetao (`current-ocean-temp-cmems-0.25.json`, ~6 MB), GFS-Wave propagation u/v with |v| =
+peak period (`current-ocean-waves-gfswave-0.25.json`, ~10 MB) and significant wave height
+(`current-ocean-wave-height-gfswave-0.25.json`, ~5 MB).
 
 ## How it works (rendering pipeline in `js/wind.js`)
 
@@ -117,9 +125,28 @@ eyewall is accepted in exchange for the luminous long-streamline look.)
 
 ## Data
 
-`public/data/current-wind-surface-level-gfs-0.25.json` holds GFS 10 m surface wind (u/v,
-0.25°×0.25°, values rounded to 0.1 m/s; ~9.2 MB raw / ~2.5 MB gzipped by Vercel) in grib2json
-format. **Last refreshed: GFS analysis 2026-07-10 00:00 UTC.** Upgraded 1° → 0.5° → 0.25°
+**Data/code split (2026-07-12)**: the `current-*` weather JSONs are **not in git**. The
+refresh scripts still write them to `public/data/` (now git-ignored) so local dev works
+exactly as before; production serves them from a **Cloudflare R2 bucket** instead. In
+`js/wind.js`, every weather-file URL goes through `DATA_ROOT`, resolved once at load:
+a `#data=<url>` hash override (for testing a bucket before wiring it in — e.g.
+`#layer=waves&data=https://bucket.example/`) → local `data/` when served from
+localhost/127.x/file: → `R2_DATA_ROOT` (a constant at the top of the orchestration
+section; **set it to the bucket's public base URL after creating the bucket**). The three
+topology files stay in the repo and always load relative — they're static assets, not data.
+`scripts/upload_data.sh` ships the 12 files to R2 (S3-compatible API via the AWS CLI,
+`--cache-control max-age=1800`; Cloudflare's edge gzips JSON on the fly). Consequences:
+data refreshes no longer create commits, force-pushes, or Vercel deploys — the repo carries
+no history churn and Vercel only redeploys on code pushes. Both paths verified headlessly:
+localhost serving from `data/`, and a cross-origin CORS stand-in bucket via `#data=`.
+Full R2 + Vercel + GitHub Actions recipe: `~/Documents/earth-vercel-deploy.md`.
+
+`current-wind-surface-level-gfs-0.25.json` holds GFS 10 m surface wind (u/v,
+0.25°×0.25°, values rounded to 0.1 m/s; ~9.2 MB raw / ~2.5 MB gzipped at the edge) in grib2json
+format. **Last refreshed: GFS analysis 2026-07-11 12:00 UTC (all seven GFS datasets, one
+cycle).** Note the data is a static snapshot — it only advances when
+`refresh_wind.py` runs; the planned GitHub Action (see Next steps) is what will make "most
+recent by default" true unattended. Upgraded 1° → 0.5° → 0.25°
 (nullschool's resolution) on 2026-07-10 for aesthetic parity; before that it was the 2014-01-31
 sample shipped with cambecc/earth. The HUD's "Data:" line always shows the loaded snapshot's
 timestamp.
@@ -137,12 +164,87 @@ layers: 2 m TMP / RH / DPT as single-record grib2json files
 (`current-{temp,rh,dewpoint}-surface-level-gfs-0.25.json`). A combined layer pairs surface
 wind (particle trails) with a scalar field colored through a d3-scale-chromatic colormap LUT
 (the vendored D3 bundle ships them, except bwr — hand-rolled two-segment ramp):
-**Temperature → matplotlib 'bwr' diverging (223.15–323.15 K, symmetric so the white point
-sits exactly on 0 °C: blue frozen, white freezing, red heat), Relative humidity → BuPu
+**Temperature → matplotlib 'bwr' diverging (263.15–318.15 K = -10–45 °C, user-revised
+2026-07-12 from the ±50 °C symmetric domain; out-of-range pins to the end colors, white
+midpoint at 17.5 °C), Relative humidity → BuPu
 (0–100 %), Dew point → PuBuGn (233.15–308.15 K)**. Colormap history (all user-directed,
 same day): temperature inferno → reversed inferno → YlOrRd (0–50 °C floor — a -40 floor
 pushed everything visible into red) → bwr; RH Purples → BuPu for contrast. The scale bar and the
 click readout follow the active layer (`overlaySpec.format`; scalar value · wind speed).
+
+The **ocean currents layer** (`feature/OceanCurrent`, 2026-07-12) reads
+`current-ocean-currents-cmems-0.25.json`: a 2-record u/v file in the same grib2json format,
+from **CMEMS Global Ocean Physics Analysis & Forecast**
+(`cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m`, daily mean, 0.494 m depth, 1/12° strided ×4 to
+¼°) via `scripts/refresh_ocean.py` + the `copernicusmarine` toolbox. The layer has no second
+scalar file — a `fromMagnitude` overlaySpec colors the sea by current speed itself through
+cambecc's segmented ocean palette (deep blue 0 → green 0.4 → sand 0.65–1.0 → red 1.5 m/s),
+and per-layer `particles` tuning (`velocityScale` 1/2500 ≈ 17× wind, `maxIntensity` 1 m/s —
+the data-driven streak guard scales along) makes the ~50×-slower currents visibly crawl.
+CMEMS land cells are null → land stays uncolored and particle-free for free.
+**Last refreshed: CMEMS daily mean 2026-07-11** (real credentialed fetch; an earlier
+CoastWatch ERDDAP stand-in used for pre-login verification has been replaced).
+Nullschool-parity rendering (2026-07-12, from the user's side-by-side screenshots): land is
+charcoal `#333338` — `topojson.merge`d country polygons filled on the `#lines` canvas *above*
+the overlay, so the vector coastline crops the grid staircase; `buildGrid`'s bilinear is
+NaN-tolerant (hole corners drop out, weights renormalize) so sea color reaches the last valid
+cell instead of retreating half a cell from every coast; the ocean overlay renders dimmer
+(alpha 0.58 vs 0.72) so the calm ocean stays near-black and the trails (multiplier 4, line
+width 1.7 device px, velocityScale 1/1700, intensity saturating at 0.7 m/s — user-matched
+against live nullschool) read as the currents. Trails cannot spill onto land: `#lines` sits
+above `#animation`, so the opaque land fill crops them at the vector coastline. Water
+without current data (Caspian, Aral, coastal grid holes) renders `NO_DATA_GRAY` — the same
+charcoal as land — rather than a black hole.
+
+The **sea water temperature layer** (`feature/SeaWaterTemperature`, 2026-07-12) pairs the
+currents-driven particles with a thetao scalar overlay
+(`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m`, °C at 0.494 m, same ¼° grid) through the
+same bwr diverging colormap as the Atmosphere temperature layer, domain **0–35 °C** (user's
+spec, revised same day from 0–50; values outside pin to the end colors via the clamped LUT
+index — the white midpoint sits at 17.5 °C so tropical water reads warm-red).
+`refresh_ocean.py` is parameterized like `refresh_wind.py`: `currents` / `currents25`
+(u/v at 0.494 m / 25.211 m) and `temperature` (thetao) products, each with a `depth`
+bracket; its `coarsen()` samples every 3rd point (1/12° → ¼°, atmosphere-grid parity) and
+fills land-sampled points from the surrounding 7×7 full-res window so the data's coast hugs
+the vector one (kills the charcoal staircase in the sea; tightened twice on user review —
+the first pass at ⅓° + 5×5 still left single-cell nubs on convoluted coasts).
+**Depths**: both CMEMS datasets carry **50 depth levels**
+(0.494, 1.54, 2.65, 3.82, 5.08, 6.44, 7.93, 9.57, 11.4, 13.5, 15.8 … 55.8 … 109.7 … 453.9 …
+1062 … 5727.9 m); we render the shallowest (0.494 m). Deeper layers only need
+`minimum_depth`/`maximum_depth` changed in `fetch()` plus a LAYERS entry.
+
+The **wave layers** (`feature/OceanWaves`, 2026-07-12) come from **GFS-Wave** — the
+WAVEWATCH III model coupled into GFS (nullschool's credited source for its waves modes) —
+via the same anonymous NOMADS filter CGI as the atmosphere (`filter_gfswave.pl`, file
+`gfswave.t{hh}z.global.0p25.f000.grib2`, **no login needed**), through
+`scripts/refresh_waves.py` (same newest-cycle walk-back as `refresh_wind.py`). One download
+of HTSGW + PERPW + DIRPW yields two files: `current-ocean-waves-gfswave-0.25.json` holds u/v
+**propagation vectors whose magnitude is the peak period in seconds** (DIRPW is the
+meteorological "direction from" — verified against the Southern Ocean westerlies, median
+265° — so propagation = from + 180°); the period overlay is then just `fromMagnitude` and
+the click readout speaks seconds, no third file. `current-ocean-wave-height-gfswave-0.25.json`
+is the HTSGW scalar. Both fields get a 5×5 NaN-dilation pass at native 0.25° (the wave
+model's land mask is a cell fatter than the vector coastline — same staircase bug as CMEMS,
+same cure). Since the third redesign round (user spec) there is **one combined Waves layer**
+(`waves`, like nullschool): the background colors by significant wave height through a
+**blue → light blue → yellow → orange → saffron** ramp (0–15 m; >15 m clips to saffron via
+the clamped LUT index), and the click readout speaks both fields ("4.2 m · 12.3 s"). The
+particles are **crest dashes, not trails** (user spec against a zoomed nullschool shot):
+`animate()` grew per-layer `maxAge`/`fade` and a `crestLength` mode that strokes an oriented
+dash PERPENDICULAR to travel through the segment midpoint — dense flickering crest rows
+**barely creeping** (velocityScale 1/360000 — waves are localized and far slower than winds;
+history 1/12000 → ×0.10 → ×⅓) and dying fast (maxAge 12, fade 0.6, multiplier 3, width 2.5;
+crest half-length 4.5 px scaled by the intensity bucket). `brightnessFloor: 40` widens the
+particle brightness ramp (default floor 130), so faster long-period swell draws markedly
+brighter crests than slow chop — deep-water phase speed grows with period, so
+period-brightness *is* speed-brightness.
+
+**CMEMS credentials**: `scripts/refresh_ocean.py` needs a Copernicus Marine account. The
+toolbox reads `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD` —
+locally these live in the git-ignored `.env/copernicusmarine` (run
+`set -a && source .env/copernicusmarine && set +a` before the script); in CI they become
+GitHub Actions repository secrets. Anonymous access does not work (the ARCO zarr store 403s
+every data chunk).
 
 To refresh (preferred path, verified working — no Java needed):
 
@@ -275,10 +377,13 @@ status line; page/HUD title is plain "earth", per user request). The burger butt
      layer). Buttons carry `data-layer` ids matching the `LAYERS` registry in `wind.js`; clicking
      dispatches a `layerchange` CustomEvent, and `loadLayer()` in the engine swaps the
      dataset, restarts the pipeline, and syncs the active-button state (single source of
-     truth). `#layer=<id>` in the URL hash selects the initial layer (also the
-     headless-testing hook, since the menu needs a click). An **Ocean tab** (with "Currents"
-     and "Temperature" layers) is written but commented out in `index.html` — the user asked
-     not to show it until those pages are ready; uncomment the two marked blocks to enable.
+     truth) — including revealing the tab that owns the layer when booting via the hash.
+     `#layer=<id>` in the URL hash selects the initial layer (also the headless-testing
+     hook, since the menu needs a click). Since 2026-07-12 the domains **stack vertically**
+     (`#tabs` is a column; each tab header sits directly above its own `.tab-body`): the
+     **Ocean tab** below Atmosphere holds **Current-Surface** (`data-layer="ocean"`),
+     **Current-25m** (`data-layer="ocean25"`), **Temperature** (`data-layer="sst"`) and
+     **Waves** (`data-layer="waves"`, the combined height + direction/period map), all live.
    - Data source + snapshot date lines, the color-scale bar, the click-for-wind-speed
      readout, and credits — all IDs (`#scale`, `#data-date`, `#location`, `#status`)
      unchanged, so `wind.js` needed no edits; `#status` lives in the always-visible bar so
@@ -292,47 +397,40 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
 
 ## Next steps
 
-   - **Ocean layers — IN PROGRESS, paused 2026-07-10 (battery)**. User wants two feature
-     branches (`feature/ocean-currents`, `feature/ocean-temperature`), land left uncolored,
-     Ocean tab stacked **vertically below** ATMOSPHERE in the burger menu, rendering to
-     resemble `../Ocean.png` (nullschool currents: land dark/uncolored, ocean deep blue →
-     green → yellow → red by current speed; that's cambecc's segmented currents palette,
-     stops 0:(10,25,68) 0.15:(10,25,250) 0.4:(24,255,93) 0.65:(255,233,102) 1.0:(255,233,15)
-     1.5:(255,15,15), domain 0–1.5 m/s). **Data source per user: CMEMS Global Ocean Physics
-     Analysis & Forecast (nullschool's source; waves would be WAVEWATCH III/NOMADS).**
-     Findings, all verified working today:
-       - NOMADS has NO grib filter for RTOFS; RTOFS 2ds is now netCDF-only (149–185 MB,
-         curvilinear) — rejected. NOMADS OPeNDAP is retired (SCN 25-81). NOMADS pub dir
-         listings need `curl --http1.1` (malformed content-length breaks HTTP/2).
-       - **CMEMS ARCO zarr is anonymously readable** (no login, unlike the toolbox):
-         STAC catalog `https://stac.marine.copernicus.eu/metadata/
-         GLOBAL_ANALYSISFORECAST_PHY_001_024/product.stac.json` → per-dataset
-         `dataset.stac.json` → asset `downsampled4` =
-         `https://s3.waw3-1.cloudferro.com/mdl-arco-time-007/arco/
-         GLOBAL_ANALYSISFORECAST_PHY_001_024/cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m_202406/
-         downsampled4.zarr` (⅓° effective — right size for the engine). Currents dataset:
-         `...phy-cur...P1D-m` vars uo/vo (m/s, float32, no scale/offset, valid ±5); ocean
-         temperature: `...phy-thetao...P1D-m` (thetao, °C). Shapes (1510 time, 50 elevation,
-         511 lat, 1080 lon), chunks (1,1,511,1080) = **one HTTP GET per field** at
-         `uo/{t}.0.{lat_chunk}.{lon_chunk}` (here `{t}.0.0.0`); blosc-lz4-shuffle compressed
-         (pip `numcodecs`); time = hours since 1950-01-01 (pick last index ≤ now = analysis
-         day); depth index 0 = 0.494 m surface; lat 511 @ ⅓° (check order, flip north-first
-         for scan mode 0), lon 1080 from -180.
-       - Plan: `scripts/refresh_ocean.py` (urllib + numcodecs blosc + numpy; no pygrib)
-         emitting the same grib2json format; currents = 2-record u/v file (particles + speed
-         overlay via a `fromMagnitude` overlaySpec, segmented palette above); ocean temp =
-         thetao scalar (Turbo, ≈-2–32 °C) with the currents file driving particles. Engine
-         needs per-layer `speedFactor` (~10–15× — currents are ~50× slower than wind; also
-         scale the streak guard!) and `maxIntensity` (~1 m/s), plus per-layer `#data-label`
-         source line ("CMEMS Global Ocean Physics"). Land uncolored + no particles on land
-         come free: CMEMS land = NaN → interpolate() returns null.
-       - NB the pygrib/PIL/numcodecs venv lives in the session scratchpad under /tmp —
-         likely wiped by reboot; recreate with `python3 -m venv gribenv && pip install
-         pygrib pillow numpy numcodecs`.
-   - **Ocean tab markup** is still commented out in `index.html` (two marked blocks); menu
-     tabs need `#tabs {flex-direction: column}` for the vertical stacking.
-   - Automate data refresh (e.g., a GitHub Action running `scripts/refresh_wind.py` every 6 h
-     and redeploying) — otherwise the deployed snapshot goes stale from deploy day.
+   - **Ocean currents — DONE (2026-07-12, `feature/OceanCurrent`).** Real CMEMS data via
+     the user's credentials in `.env/copernicusmarine`; nullschool-parity pass (charcoal
+     land fill, NaN-tolerant bilinear, dim overlay + dense hairline trails) verified against
+     the user's side-by-side screenshots; atmosphere layers regression-checked.
+     **Data-access facts** (previous session's note was wrong): the CMEMS ARCO zarr is
+     *not* fully anonymous — `.zmetadata` and coordinate chunks GET fine, but every data
+     chunk (`uo/{t}.0.0.0` etc.) returns **403**, verified across chunk indices and both
+     dimension separators. Hence the credentialed toolbox. Store facts that remain true:
+     time = hours since 1950-01-01, daily means incl. ~8 forecast days (script picks newest
+     day ≤ today); depth idx 0 = 0.494 m; uo/vo float32 m/s, no scale/offset; land = NaN;
+     lat −80..90 (flip north-first for scan mode 0). Dead ends: NOMADS has no RTOFS filter,
+     RTOFS 2ds is netCDF-only, NOMADS OPeNDAP retired (SCN 25-81), OSCAR/jplOscar stale.
+     Working fallback: NOAA CoastWatch ERDDAP `noaacwBLENDEDNRTcurrentsDaily` (0.25° blended
+     geostrophic; `.ncoJson` + stride; needs curl — python-urllib UA gets 403).
+   - **Sea water temperature — DONE (2026-07-12, `feature/SeaWaterTemperature`)**: thetao
+     scalar over currents-driven particles, bwr 0–50 °C per user spec. Possible follow-up:
+     **depth-level layers** — both CMEMS datasets have 50 depths (0.494 m … 5727.9 m; e.g.
+     15.8 m, 109.7 m, 453.9 m are natural picks); `fetch()`'s minimum/maximum_depth plus a
+     LAYERS entry per depth is all it takes.
+   - NB the venv (pygrib/PIL/numpy/copernicusmarine) lives in the session scratchpad under
+     /tmp — likely wiped by reboot; recreate with `python3 -m venv gribenv && ./gribenv/bin/pip
+     install pygrib pillow numpy copernicusmarine`.
+   - Automate data refresh: a GitHub Action running `scripts/refresh_wind.py` +
+     `refresh_waves.py` (anonymous) and `refresh_ocean.py` (CMEMS secrets), then
+     `scripts/upload_data.sh` straight to the R2 bucket — **no commits, no Vercel
+     redeploys** (data/code split, 2026-07-12). Cadence: **once daily by default**
+     (user spec, 2026-07-12 — matches CMEMS's actual update rate); the repo variable
+     `REFRESH_CADENCE=6h` switches all datasets to the old 6-hourly cadence without a
+     workflow edit (a gate job filters the 6-hourly cron firings). Remaining one-time
+     setup on the user's side: create the R2 bucket + public URL, set `R2_DATA_ROOT`
+     in `wind.js`, add the five Actions secrets (+ the optional cadence variable).
+     The full step-by-step guide (R2 bucket, CORS, secrets, ready-to-paste workflow
+     YAML) lives at `~/Documents/earth-vercel-deploy.md` (deliberately outside the
+     repo, 2026-07-12).
    - Touch pinch-zoom (only wheel zoom is implemented). A read-only URL-hash initial view
      already exists (`#rotate=λ,φ&zoom=k`, e.g. `#rotate=-128.5,-21.5&zoom=5` centers the
      typhoon; also the headless-testing hook) — writing the hash back on interaction like the
@@ -360,17 +458,162 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   unlike currents). If both ocean branches instead modify the monolithic `wind.js`
   independently, the second merge will be painful; after the refactor each feature branch
   touches only its own layer module.
-- **Keep data refreshes out of feature branches.** The ~9 MB wind JSON updates on its own
-  cadence (eventually 6-hourly via GitHub Action); those commits land directly on `main`.
-  Mixing snapshot churn into feature history bloats it and guarantees merge noise. If the
-  repo eventually carries one large JSON per layer refreshed several times a day, repo size
-  will balloon — consider having the refresh Action deploy data to Vercel without committing
-  it (a later problem).
+- **Data refreshes never touch git at all** (since the 2026-07-12 data/code split — this
+  resolved the old "keep data refreshes out of feature branches" rule and the repo-size
+  worry in one move): the weather JSONs are git-ignored, refresh scripts update the local
+  copies, and `upload_data.sh` ships them to the R2 bucket. Feature branches and `main`
+  carry code only. NB: history from before the split still contains old data blobs; a
+  one-time `git filter-repo` pass could shrink the clone if that ever matters.
 - **Avoid** a `develop` branch or gitflow (pure ceremony at this scale) and long-lived
   parallel feature branches — the features share the engine, so divergence is the main risk
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `main` (refresh cadence + quality pass + history cleanup):
+
+- **Daily refresh by default** (was 6-hourly, applies to all datasets): the workflow in
+  `~/Documents/earth-vercel-deploy.md` keeps a 6-hourly cron but a gate job only lets the
+  ~00:45 UTC firing through unless the GitHub repo **variable** `REFRESH_CADENCE=6h` is
+  set — toggling cadence is a settings-page change, no workflow edit.
+- **Quality pass over `wind.js`**: `OCEAN_ALPHA` constant replaces the repeated
+  `Math.floor(0.58 * 255)` in the ocean scalar specs; the wave-particle comment block
+  rewritten to describe the final behavior instead of accreted was/now changelog (which
+  lives here in Changes). Dead-code audit found none: every function and top-level
+  constant in `wind.js`/`menu.js` and every script import is referenced.
+- **History rewritten with `git filter-repo`** to drop the pre-split data blobs from
+  all commits: `.git` went 49 MB → 1.9 MB; one pure data-refresh commit became empty and
+  was pruned (47 → 46 commits). Force-pushed. Old clones must be re-cloned; all commit
+  hashes changed.
+
+2026-07-12, on `main` (data/code split — Cloudflare R2):
+
+- **Weather data out of git**: the 12 `current-*.json` files are git-ignored and untracked
+  (still written to `public/data/` by the refresh scripts for local dev). Production fetches
+  them from a Cloudflare R2 bucket: `wind.js` routes every weather URL through `DATA_ROOT`
+  (`#data=` hash override → local on localhost → `R2_DATA_ROOT` constant, **placeholder until
+  the bucket exists**). Topologies stay in the repo. New `scripts/upload_data.sh` (S3 API,
+  AWS CLI, cache-control 1800 s). Refreshes now cause zero commits/force-pushes/redeploys.
+- Verified headlessly on both paths: localhost → local files; `#data=http://127.0.0.1:8421/`
+  → a CORS-enabled stand-in bucket on a second origin (temperature layer, flow + scalar).
+- Deployment guide `~/Documents/earth-vercel-deploy.md` rewritten around R2 (bucket setup,
+  public URL + CORS, five Actions secrets, upload workflow).
+
+2026-07-12, on `main` (wave-dash lifecycle):
+
+- **Softer crest lifecycle** — maxAge 12 → 20, fade 0.6 → 0.72: dashes were blinking in
+  and out too fast (user feedback); they now ease in/out over a longer life, still without
+  smearing thanks to the near-static march speed.
+- **Vercel deployment guide** written to `~/Documents/earth-vercel-deploy.md` (kept outside
+  the repo on purpose): Vercel project `earth` serving `public/`, GitHub Actions 6-hourly
+  refresh workflow, CMEMS secrets as Actions repository secrets, repo-size strategy.
+
+2026-07-12, on `main` (wave-layer redesign, third round — combined map):
+
+- **One Waves layer** — `wavep` removed; the single `waves` map combines the height colormap
+  with the direction/period crest dashes (nullschool-style), readout "m · s" on click.
+- **Height colormap → blue → light blue → yellow → orange → saffron** (user spec), 0–15 m,
+  higher values clipped to saffron; replaces white→gray→teal.
+- **Speed-scaled brightness** — `windIntensityColorScale` gained a per-layer brightness
+  floor (`brightnessFloor: 40` for waves vs default 130): faster (longer-period) waves draw
+  markedly brighter crests.
+- **Even slower march** — velocityScale 1/120000 → 1/360000; the crests barely move, as
+  waves should against winds.
+
+2026-07-12, on `main` (wave-layer redesign, user feedback on the first render):
+
+- **Crest dashes** — wave particles now stroke an oriented dash **perpendicular to travel**
+  (`crestLength` mode in `animate()`), march at **1/10th** the previous speed
+  (velocityScale 1/120000) and die quickly (maxAge 12, fade 0.6): a flickering crest field
+  like the user's zoomed nullschool screenshot, nothing like the wind traces.
+- **Wave-height colormap → white → gray → teal** (user spec): silvery calm seas, deep-teal
+  storm core; the navy→sand→orange first cut is gone.
+
+2026-07-12, on `feature/OceanWaves`:
+
+- **Wave layers** (`waves` / `wavep`) — GFS-Wave (WAVEWATCH III / NCEP / NWS, nullschool's
+  source) significant wave height + peak wave period, via the anonymous NOMADS filter —
+  **no login required** (checked before building; the user asked for no workarounds if one
+  was). New `scripts/refresh_waves.py`; one flow file carries propagation u/v with
+  |v| = period (s), so the period overlay is `fromMagnitude` and the readout speaks seconds.
+- **Crest-dash particle style** — per-layer `maxAge` and `fade` in `particleOpts`: the wave
+  layers draw short, sparse, thick dashes marching in the propagation direction (nullschool's
+  waves look) instead of long streamlines; tuned against the user's reference screenshot
+  (multiplier 2.2→1.5, maxAge 18→14, fade 0.80→0.75, width 2.6→2.9 after first render).
+- **Coastal NaN-dilation** (5×5) in the wave converter — the wave model's land mask is a
+  cell fatter than the vector coastline; pre-empts the charcoal-staircase bug the CMEMS
+  layers hit. Atmosphere surface-wind layer regression-checked after the `animate()` change.
+
+2026-07-12, on `main` (post-merge tuning, second round):
+
+- **Deep-current level 110 m → 25 m** (user pick): layer id `ocean110`→`ocean25`, button
+  **Current-25m**, data at the 25.211 m level (near the mixed-layer base) — product
+  `currents25`, file `current-ocean-currents-25m-cmems-0.25.json`.
+- **Atmosphere temperature domain -50–50 → -10–45 °C** (user spec): populated range gets
+  the full bwr stretch, endpoints pin (same clamping as the ocean scale); the white point
+  moves from 0 °C to 17.5 °C.
+
+2026-07-12, on `main` (post-merge tuning):
+
+- **Residual blockiness tuned away** (third user pass): ocean grids re-coarsened at
+  **¼°** (stride 3 — atmosphere-grid parity) with a **7×7** NaN-fill window (±one output
+  cell), replacing ⅓° + 5×5 whose single-cell charcoal nubs still showed on convoluted
+  coasts. Data files renamed `…-cmems-0.25.json` (currents ~11 MB, thetao ~6 MB).
+
+2026-07-12, on `feature/DeepCurrent`:
+
+- **Current @ 110 m layer** (`ocean110`) — uo/vo at the 109.73 m level (below the mixed
+  layer: the Equatorial Undercurrent and boundary-current cores, invisible at the
+  surface). Menu buttons renamed **Current-Surface** / **Current-110m**; the two current
+  layers share one `CURRENT_SPEED_SCALAR` spec; `refresh_ocean.py` products carry a
+  `depth` bracket and the header's `surface1Value` reports the real level.
+- **Coastal blockiness fixed in the data** (user bug report, ScreenshotSST): striding the
+  1/12° grid marked a ⅓° cell "land" whenever its exact sample point was — a land mask a
+  whole cell fatter than the vector coastline (charcoal staircase in the sea). `coarsen()`
+  now fills land-sampled points with the mean of the surrounding 5×5 full-res window, so
+  the data's sea reaches within one 1/12° cell of the real coast. All three ocean datasets
+  regenerated.
+- **SST domain 0–50 → 0–35 °C** (user spec): the ocean never gets hotter, so the red half
+  of bwr was wasted; the white midpoint now sits at 17.5 °C and tropical water reads
+  warm-red.
+
+2026-07-12, on `feature/SeaWaterTemperature`:
+
+- **Sea water temperature layer** (`sst`) — CMEMS thetao (°C, 0.494 m) as a scalar overlay
+  under the currents-driven particles; bwr diverging 0–50 °C (same scheme as Atmosphere
+  temperature; out-of-range pins to end colors). `refresh_ocean.py` parameterized into
+  PRODUCTS (`currents` / `temperature`), Ocean tab's Temperature button live.
+- **Ocean-layer generalizations** — dataless-water charcoal and the m/s click readout now
+  key on the layer (`landFill` / `flowFormat`) instead of the currents-only
+  `fromMagnitude` flag; shared OCEAN_* constants for file/credit/particles.
+- **Depths explored**: both CMEMS datasets carry 50 levels, 0.494–5727.9 m (we use the
+  shallowest); deeper layers need one `fetch()` parameter + a LAYERS entry.
+
+2026-07-12, on `feature/OceanCurrent`:
+
+- **Ocean currents layer** — new `ocean` entry in `LAYERS`: CMEMS surface currents drive
+  both particles and a `fromMagnitude` speed overlay (segmented nullschool ocean palette,
+  0–1.5 m/s); per-layer `particles` tuning (velocityScale/maxIntensity) and per-layer
+  credit/date lines; click readout shows m/s. `segmentedLut()` added beside the colormap
+  LUTs; grid continuity check `floor`→`round` (1080 × ⅓° is 359.99… in floats).
+- **Vertical domain tabs** — `#tabs` is now a column with each tab header above its own
+  layer row; Ocean sits below Atmosphere with live **Current** and a "Temperature soon"
+  placeholder; `loadLayer()` also reveals the owning tab when booting from `#layer=…`.
+- **`scripts/refresh_ocean.py`** — copernicusmarine-toolbox reader (1/12° → stride ×4 → ⅓°,
+  grib2json output, land = null); credentials from the git-ignored `.env/copernicusmarine`.
+  First real dataset (2026-07-11 daily mean) committed.
+- **Nullschool-parity pass** (user screenshot comparison): charcoal `#333338` land fill
+  above the overlay (crisp vector coasts instead of black land + blocky grid staircase),
+  NaN-tolerant renormalizing bilinear in `buildGrid` (sea color reaches the coast), ocean
+  overlay dimmed to alpha 0.58 with denser/finer trails (multiplier 7, width 1.2,
+  saturation 0.7 m/s) so currents read as luminous streamlines over near-black ocean.
+- **Ocean follow-up fixes** (user bug reports, same day): trail spill-over onto land ended
+  by moving `#lines` above `#animation` in the canvas stack — the opaque land fill now crops
+  trails at the vector coastline (the "boolean op" costs nothing); dataless water (Caspian,
+  Aral, coastal grid holes) painted `NO_DATA_GRAY` = the land charcoal instead of black, in
+  both the field and the drag preview; trails retuned to the confirmed nullschool character —
+  faster, sparser, slightly thicker (velocityScale 1/2500→1/1700, multiplier 7→4, width
+  1.2→1.7).
 
 All of the below landed on 2026-07-10 (the project went from the stock cambecc/earth port to
 its current state in one extended session):

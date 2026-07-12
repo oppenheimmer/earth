@@ -23,6 +23,8 @@
     var FRAME_RATE = 40;                      // desired milliseconds per frame
     var NULL_WIND_VECTOR = [NaN, NaN, null];  // no wind data at this location [u, v, mag]
     var TRANSPARENT_BLACK = [0, 0, 0, 0];
+    var NO_DATA_GRAY = [51, 51, 56, 255];     // = drawMap's #333338 land fill; ocean layers paint
+                                              // dataless water (Caspian, coastal grid holes) like land
     var MAX_INTENSITY = 25;                   // wind velocity (m/s) at which particle intensity is max (17 in the original; higher cap keeps storm bands from saturating white)
     var VELOCITY_SCALE = 1 / 42000;           // particle screen speed per unit of wind velocity (1/60000 in the original)
     var ZOOM_SPEED_EXPONENT = 0.6;            // 0 = speed grows fully with zoom (frantic close-up), 1 = constant speed at all zooms (sparse short tracks); 0.6 grows gently, ~2× at zoom 6
@@ -85,14 +87,17 @@
     }
 
     /** Near-neutral bright styles for particle trails plus indexFor(mag) to pick a bucket. */
-    function windIntensityColorScale(step, maxWind) {
+    function windIntensityColorScale(step, maxWind, floor) {
         var result = [];
-        for (var j = 130; j <= 255; j += step) {  // 85 in the original; high floor keeps slow-wind trails bright
+        // Brightness floor: 130 keeps slow-wind trails bright (85 in the original); the wave
+        // layer drops it so slow short chop is dim and fast long swell is markedly brighter.
+        floor = floor || 130;
+        for (var j = floor; j <= 255; j += step) {
             // Near-neutral strokes: the hue comes from the overlay bleeding through the alpha
             // (white over red reads pink, over green pale green). A stronger green tint muddied
             // the red eyewall into brown. Alpha falls with speed (0.70 slow → 0.50 fast) so calm
             // regions get bright distinct traces while storm cores can't pile up into mush.
-            var t = (j - 130) / (255 - 130);
+            var t = (j - floor) / (255 - floor);
             var alpha = (0.70 - 0.20 * t).toFixed(2);
             result.push("rgba(" + Math.round(j * 0.90) + ", " + j + ", " + Math.round(j * 0.92) + ", " + alpha + ")");
         }
@@ -144,7 +149,7 @@
         }
 
         var grid = [], p = 0;
-        var isContinuous = Math.floor(ni * Δλ) >= 360;
+        var isContinuous = Math.round(ni * Δλ) >= 360;  // round: 1080 × ⅓ is 359.99… in floats
         var rowLength = ni + (isContinuous ? 1 : 0);
         for (var j = 0; j < nj; j++) {
             var row = new Float32Array(rowLength * 2);
@@ -171,11 +176,18 @@
 
             var x = i - fi, y = j - fj;
             var rx = 1 - x, ry = 1 - y;
-            var a = rx * ry, b = x * ry, c = rx * y, d = x * y;
             var i0 = fi * 2, i1 = ci * 2;
-            var u = row0[i0] * a + row0[i1] * b + row1[i0] * c + row1[i1] * d;
-            var v = row0[i0 + 1] * a + row0[i1 + 1] * b + row1[i0 + 1] * c + row1[i1 + 1] * d;
-            if (isNaN(u) || isNaN(v)) return null;  // NaN marks holes in the source data
+            // NaN-tolerant bilinear: hole corners (ocean grids mark land as NaN) drop out and
+            // the remaining weights renormalize, so color/flow reach the last valid cell instead
+            // of retreating half a cell from every coast (blocky staircase against the land).
+            var u = 0, v = 0, w = 0, k;
+            if (!isNaN(row0[i0])) { k = rx * ry; u += row0[i0] * k; v += row0[i0 + 1] * k; w += k; }
+            if (!isNaN(row0[i1])) { k = x * ry;  u += row0[i1] * k; v += row0[i1 + 1] * k; w += k; }
+            if (!isNaN(row1[i0])) { k = rx * y;  u += row1[i0] * k; v += row1[i0 + 1] * k; w += k; }
+            if (!isNaN(row1[i1])) { k = x * y;   u += row1[i1] * k; v += row1[i1 + 1] * k; w += k; }
+            if (w === 0) return null;  // all four corners are holes
+            u /= w;
+            v /= w;
             return [u, v, Math.sqrt(u * u + v * v)];
         }
 
@@ -197,7 +209,7 @@
         var ni = header.nx, nj = header.ny;
 
         var grid = [], p = 0;
-        var isContinuous = Math.floor(ni * Δλ) >= 360;
+        var isContinuous = Math.round(ni * Δλ) >= 360;  // round: 1080 × ⅓ is 359.99… in floats
         var rowLength = ni + (isContinuous ? 1 : 0);
         for (var j = 0; j < nj; j++) {
             var row = new Float32Array(rowLength);
@@ -236,18 +248,44 @@
         return lut;
     }
 
+    /** 256-entry [r,g,b] lookup table from [value, [r,g,b]] stops spanning [min, max]. */
+    function segmentedLut(stops, min, max) {
+        var lut = [];
+        for (var i = 0; i < 256; i++) {
+            var v = min + (max - min) * i / 255;
+            var k = 1;
+            while (k < stops.length - 1 && stops[k][0] < v) k++;
+            var lo = stops[k - 1], hi = stops[k];
+            var t = Math.max(0, Math.min(1, (v - lo[0]) / (hi[0] - lo[0])));
+            lut.push([
+                Math.round(lo[1][0] + t * (hi[1][0] - lo[1][0])),
+                Math.round(lo[1][1] + t * (hi[1][1] - lo[1][1])),
+                Math.round(lo[1][2] + t * (hi[1][2] - lo[1][2]))
+            ]);
+        }
+        return lut;
+    }
+
     /**
      * Overlay color at (λ, φ): the current layer's scalar field through its colormap, or the
-     * default wind-speed sinebow when the layer has no scalar. Used by the full-res field
-     * interpolation and the low-res drag preview alike.
+     * default wind-speed sinebow when the layer has no scalar. A `fromMagnitude` spec colors
+     * by the flow speed itself (ocean currents) instead of a second dataset. Used by the
+     * full-res field interpolation and the low-res drag preview alike.
      */
     function overlayColorAt(λ, φ, windMag) {
         if (!overlaySpec) return windOverlayColor(windMag, OVERLAY_ALPHA);
-        var v = scalarGrid && scalarGrid.interpolate(λ, φ);
-        if (v === null || v === undefined) return TRANSPARENT_BLACK;
+        var v;
+        if (overlaySpec.fromMagnitude) {
+            v = windMag;
+        }
+        else {
+            v = scalarGrid && scalarGrid.interpolate(λ, φ);
+            // Ocean layers render dataless spots like the landmass, not as holes.
+            if (v === null || v === undefined) return landFill ? NO_DATA_GRAY : TRANSPARENT_BLACK;
+        }
         var t = (v - overlaySpec.min) / (overlaySpec.max - overlaySpec.min);
         var c = overlaySpec.lut[Math.max(0, Math.min(255, Math.round(t * 255)))];
-        return [c[0], c[1], c[2], OVERLAY_ALPHA];
+        return [c[0], c[1], c[2], overlaySpec.alpha || OVERLAY_ALPHA];
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -345,6 +383,8 @@
     // Two layers of line work: sphere fill + graticule live on #map, *below* the color
     // overlay; coastlines/borders/lakes live on #lines, *above* it — under the overlay the
     // 0.72 alpha dimmed outlines to ~30% brightness and they vanished behind the trails.
+    // #lines is also above #animation, so the ocean layers' opaque land fill crops any
+    // particle trail that strays past the coastline.
     function drawMap(fast) {
         if (!mesh) return;
 
@@ -369,6 +409,15 @@
         var lctx = linesCanvas.getContext("2d");
         var lpath = d3.geoPath(projection, lctx);
         lctx.clearRect(0, 0, view.width, view.height);
+        if (landFill) {
+            // Ocean layers: charcoal land painted *above* the overlay (nullschool's look).
+            // The crisp vector edge also crops the ⅓°-grid staircase where sea color
+            // bleeds past the coastline.
+            lctx.beginPath();
+            lpath(fast ? mesh.landLo : mesh.landHi);
+            lctx.fillStyle = "#333338";
+            lctx.fill();
+        }
         strokeOn(lctx, lpath, fast ? mesh.coastLo : mesh.coastHi, 1.0, 1.6);  // prominent continent outlines
         strokeOn(lctx, lpath, fast ? mesh.bordersLo : mesh.bordersHi, 0.3, 0.75);
         strokeOn(lctx, lpath, fast ? mesh.lakesLo : mesh.lakesHi, 0.4, 0.75);
@@ -460,7 +509,7 @@
         // normalization made tracks short and sparse at every zoom; no normalization made
         // close-ups frantic and overshot tight vortices. The exponent grows speed gently with
         // zoom; MAX_PARTICLE_STEP still backstops the eyewall. Guard uses the same factor.
-        var velocityScale = bounds.height * VELOCITY_SCALE *
+        var velocityScale = bounds.height * particleOpts.velocityScale *
             Math.pow(initialScale / projection.scale(), ZOOM_SPEED_EXPONENT);
 
         var columns = [];
@@ -484,6 +533,11 @@
                                 var scalar = wind[2];  // magnitude in m/s, before distortion
                                 wind = distort(λ, φ, x, y, velocityScale, wind);
                                 color = overlayColorAt(λ, φ, scalar);
+                            }
+                            else if (landFill) {
+                                // Dataless water on an ocean layer (Caspian, coastal grid
+                                // holes): render like the landmass, not as a black hole.
+                                color = NO_DATA_GRAY;
                             }
                         }
                     }
@@ -564,8 +618,9 @@
                 var coord = projection.invert(point);
                 if (coord && isFinite(coord[0])) {
                     var wind = grid.interpolate(coord[0], coord[1]);
-                    if (wind) {
-                        var color = overlayColorAt(coord[0], coord[1], wind[2]);
+                    var color = wind ? overlayColorAt(coord[0], coord[1], wind[2]) :
+                        landFill ? NO_DATA_GRAY : null;
+                    if (color) {
                         var k = (j * w + i) * 4;
                         data[k] = color[0];
                         data[k + 1] = color[1];
@@ -593,11 +648,17 @@
 
     function animate(field, cancel) {
         var bounds = field.bounds;
-        var colorStyles = windIntensityColorScale(INTENSITY_SCALE_STEP, MAX_INTENSITY);
+        var colorStyles = windIntensityColorScale(INTENSITY_SCALE_STEP, particleOpts.maxIntensity,
+            particleOpts.brightnessFloor);
         var buckets = colorStyles.map(function () { return []; });
         var dpr = window.devicePixelRatio || 1;
+        // Trail shape is a per-layer choice: long fluid streamlines (winds, currents) vs
+        // the wave layers' short crest dashes (small maxAge + fast fade).
+        var maxAge = particleOpts.maxAge || MAX_PARTICLE_AGE;
+        var crest = particleOpts.crestLength || 0;  // >0: dash ⊥ to travel instead of a trail segment
         // Scale count with dpr (capped) so thinner device-px trails keep the same visual density.
-        var particleCount = Math.round(bounds.width * PARTICLE_MULTIPLIER * Math.min(dpr, 2));
+        var particleCount = Math.round(bounds.width * (particleOpts.multiplier || PARTICLE_MULTIPLIER) *
+            Math.min(dpr, 2));
         if (isMobile()) {
             particleCount *= PARTICLE_REDUCTION;
         }
@@ -608,18 +669,18 @@
         // threshold killed all fast-wind particles (empty typhoon eyewall) when zoomed in.
         var pxPerDegree = projection.scale() * Math.PI / 180;
         var zoomNorm = Math.pow(initialScale / projection.scale(), ZOOM_SPEED_EXPONENT);  // as in interpolateField
-        var maxJump = Math.max(10, 2 * grid.maxSpeed * bounds.height * VELOCITY_SCALE * zoomNorm * pxPerDegree);
+        var maxJump = Math.max(10, 2 * grid.maxSpeed * bounds.height * particleOpts.velocityScale * zoomNorm * pxPerDegree);
         var maxJump2 = maxJump * maxJump;
 
         var particles = [];
         for (var i = 0; i < particleCount; i++) {
-            particles.push(field.randomize({age: Math.floor(Math.random() * MAX_PARTICLE_AGE)}));
+            particles.push(field.randomize({age: Math.floor(Math.random() * maxAge)}));
         }
 
         function evolve() {
             buckets.forEach(function (bucket) { bucket.length = 0; });
             particles.forEach(function (particle) {
-                if (particle.age > MAX_PARTICLE_AGE) {
+                if (particle.age > maxAge) {
                     field.randomize(particle).age = 0;
                 }
                 var x = particle.x;
@@ -627,7 +688,7 @@
                 var v = field(x, y);  // vector at current position
                 var m = v[2];
                 if (m === null) {
-                    particle.age = MAX_PARTICLE_AGE;  // particle has escaped the grid, never to return
+                    particle.age = maxAge;  // particle has escaped the grid, never to return
                 }
                 else {
                     var xt = x + v[0];
@@ -636,7 +697,7 @@
                         // The projection's finite-difference distortion diverges at the globe's
                         // limb, producing screen vectors hundreds of px long; drawing one paints
                         // a straight streak across the disc. Respawn the particle instead.
-                        particle.age = MAX_PARTICLE_AGE;
+                        particle.age = maxAge;
                     }
                     else if (field.isDefined(xt, yt)) {
                         particle.xt = xt;
@@ -654,8 +715,11 @@
         }
 
         var g = animCtx;
-        g.lineWidth = PARTICLE_LINE_WIDTH / dpr;  // PARTICLE_LINE_WIDTH device px regardless of screen density
-        g.fillStyle = "rgba(0, 0, 0, 0.97)";  // per-frame trail fade: slow → long fluid streamlines
+        // The layer's line width in device px regardless of screen density.
+        g.lineWidth = (particleOpts.lineWidth || PARTICLE_LINE_WIDTH) / dpr;
+        // Per-frame trail fade: 0.97 → long fluid streamlines; the wave layers drop it so
+        // only the last few segments survive — a short dash, not a streak.
+        g.fillStyle = "rgba(0, 0, 0, " + (particleOpts.fade || 0.97) + ")";
 
         function draw() {
             // Fade existing particle trails.
@@ -669,9 +733,27 @@
                 if (bucket.length > 0) {
                     g.beginPath();
                     g.strokeStyle = colorStyles[i];
+                    // Crest mode: half-length grows with the bucket's intensity — long
+                    // swell draws longer crests than short chop.
+                    var half = crest * (0.5 + 0.5 * i / (colorStyles.length - 1));
                     bucket.forEach(function (particle) {
-                        g.moveTo(particle.x, particle.y);
-                        g.lineTo(particle.xt, particle.yt);
+                        if (crest) {
+                            // Oriented dash perpendicular to travel, through the midpoint:
+                            // a wave crest marching in the propagation direction.
+                            var dx = particle.xt - particle.x, dy = particle.yt - particle.y;
+                            var len = Math.sqrt(dx * dx + dy * dy);
+                            if (len > 0) {
+                                var ux = -dy / len * half, uy = dx / len * half;
+                                var mx = (particle.x + particle.xt) / 2;
+                                var my = (particle.y + particle.yt) / 2;
+                                g.moveTo(mx - ux, my - uy);
+                                g.lineTo(mx + ux, my + uy);
+                            }
+                        }
+                        else {
+                            g.moveTo(particle.x, particle.y);
+                            g.lineTo(particle.xt, particle.yt);
+                        }
                         particle.x = particle.xt;
                         particle.y = particle.yt;
                     });
@@ -734,7 +816,7 @@
             if (v !== null) parts.push(overlaySpec.format(v));
         }
         var wind = grid.interpolate(coord[0], coord[1]);
-        if (wind) parts.push((wind[2] * 3.6).toFixed(0) + " km/h");
+        if (wind) parts.push(flowFormat(wind[2]));
         setLocation(parts.length ?
             parts.join(" · ") + " @ " + formatCoordinates(coord[0], coord[1]) :
             formatCoordinates(coord[0], coord[1]));
@@ -754,43 +836,162 @@
         return t < 0.5 ? "rgb(" + c + "," + c + ",255)" : "rgb(255," + c + "," + c + ")";
     }
 
-    var SURFACE_WIND = "data/current-wind-surface-level-gfs-0.25.json";
+    // Data/code split (2026-07-12): the current-* weather JSONs are NOT in git — the
+    // refresh scripts write them to public/data/ (git-ignored) for local dev, and CI
+    // uploads them to a public Cloudflare R2 bucket for the deployed site. Static
+    // topologies (earth-topo, countries) stay in the repo and always load relative.
+    // Resolution order: #data=<url> hash override (for testing a bucket before wiring
+    // it in) → local files when served from localhost/file: → the R2 public URL.
+    var R2_DATA_ROOT = "https://YOUR-R2-PUBLIC-URL/";  // ← set to the bucket's public base URL
+    var DATA_ROOT = (function () {
+        var override = new URLSearchParams(location.hash.slice(1)).get("data");
+        if (override) return override.replace(/\/?$/, "/");
+        var local = /^(localhost|127\.|\[::1\])/.test(location.hostname) ||
+            location.protocol === "file:";
+        return local ? "data/" : R2_DATA_ROOT;
+    })();
+
+    var SURFACE_WIND = DATA_ROOT + "current-wind-surface-level-gfs-0.25.json";
+    // Shared by the Ocean layers: CMEMS currents drive the particles everywhere (as surface
+    // wind does for the Atmosphere scalar layers), and the readout speaks m/s, not km/h.
+    var OCEAN_CURRENTS = DATA_ROOT + "current-ocean-currents-cmems-0.25.json";
+    var OCEAN_CREDIT = "CMEMS 0.25&deg; &nbsp;|&nbsp; Copernicus Marine Service";
+    var OCEAN_DATE_LABEL = "Data: CMEMS daily mean, ";
+    // Currents peak ~1.5 m/s vs ~100 m/s wind: particles need a much larger velocity
+    // scale to visibly flow, and trail brightness saturates early (0.7 m/s, cambecc's
+    // OSCAR value). Matched to nullschool by user comparison: moderately dense,
+    // slightly-thicker-than-wind strokes, faster motion (was 1/2500 · ×7 · 1.2 px).
+    var OCEAN_PARTICLES = {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7};
+    // Ocean overlays render dimmer than the atmosphere's OVERLAY_ALPHA: the near-black
+    // sphere bleeds through, deepening the calm-sea colors so the trails/crests read on top.
+    var OCEAN_ALPHA = Math.floor(0.58 * 255);
+    function metersPerSecond(v) { return v.toFixed(2) + " m/s"; }
+    // One spec shared by every current-speed layer (surface, 25 m):
+    var CURRENT_SPEED_SCALAR = {
+        fromMagnitude: true,  // color by current speed itself — no second dataset
+        alpha: OCEAN_ALPHA,
+        // nullschool's ocean palette: deep blue abyss → green → sand → red jets
+        lut: segmentedLut([
+            [0.0, [10, 25, 68]],
+            [0.15, [10, 25, 250]],
+            [0.4, [24, 255, 93]],
+            [0.65, [255, 233, 102]],
+            [1.0, [255, 233, 15]],
+            [1.5, [255, 15, 15]]
+        ], 0, 1.5),
+        min: 0, max: 1.5,
+        scaleLabel: "0 &ndash; 1.5 m/s",
+        format: metersPerSecond
+    };
+    // Waves: GFS-Wave (WAVEWATCH III) via the same NOMADS filter as the atmosphere layers.
+    // One combined map (user spec, like nullschool): height colormap background + direction/
+    // period crest dashes. The flow file's vectors point in the propagation direction and
+    // their magnitude is the PEAK PERIOD IN SECONDS, so the click readout speaks "m · s".
+    var WAVE_FLOW = DATA_ROOT + "current-ocean-waves-gfswave-0.25.json";
+    var WAVE_CREDIT = "GFS-Wave 0.25&deg; &nbsp;|&nbsp; WAVEWATCH III / NCEP / NWS";
+    var WAVE_DATE_LABEL = "Data: GFS-Wave (WW3), ";
+    function seconds(v) { return v.toFixed(1) + " s"; }
+    // Wave crests, not wind traces (user spec against the nullschool zoom shot): each
+    // particle draws an oriented dash PERPENDICULAR to its travel (crestLength = max half-
+    // length in px; longer swell draws longer crests). Magnitudes are periods (~5–20 s),
+    // and deep-water phase speed grows with period, so the low brightnessFloor makes
+    // faster waves visibly brighter than slow chop. The tiny velocityScale keeps the
+    // crests barely creeping (waves are localized and far slower than winds); maxAge/fade
+    // give each dash a soft ease-in/out with no trailing smear at that near-static speed.
+    var WAVE_PARTICLES = {velocityScale: 1 / 360000, maxIntensity: 22, multiplier: 3,
+        lineWidth: 2.5, maxAge: 20, fade: 0.72, crestLength: 4.5, brightnessFloor: 40};
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
-        "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
-        "500hpa": {file: "data/current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"},
-        "10hpa": {file: "data/current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
+        "1000hpa": {file: DATA_ROOT + "current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
+        "500hpa": {file: DATA_ROOT + "current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"},
+        "10hpa": {file: DATA_ROOT + "current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
         "temperature": {file: SURFACE_WIND, label: "Temperature @ Surface", scalar: {
-            file: "data/current-temp-surface-level-gfs-0.25.json",
-            // bwr diverging (user preference): blue below freezing, white at 0 °C, red heat.
-            // Symmetric domain keeps the white point exactly on 0 °C.
+            file: DATA_ROOT + "current-temp-surface-level-gfs-0.25.json",
+            // bwr diverging, domain -10–45 °C (user spec, was ±50): the populated range
+            // gets the color stretch; beyond the endpoints pins to the end colors via
+            // the clamped LUT index. White midpoint sits at 17.5 °C.
             lut: colormapLut(bwrInterpolator),
-            min: 223.15, max: 323.15,  // -50 – 50 °C
-            scaleLabel: "-50 &ndash; 50 &deg;C",
+            min: 263.15, max: 318.15,  // -10 – 45 °C
+            scaleLabel: "-10 &ndash; 45 &deg;C",
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
         }},
         "rh": {file: SURFACE_WIND, label: "Rel. Humidity @ Surface", scalar: {
-            file: "data/current-rh-surface-level-gfs-0.25.json",
+            file: DATA_ROOT + "current-rh-surface-level-gfs-0.25.json",
             lut: colormapLut(d3.interpolateBuPu),  // Purples → BuPu for better contrast (user preference)
             min: 0, max: 100,
             scaleLabel: "0 &ndash; 100 %",
             format: function (v) { return v.toFixed(0) + " %"; }
         }},
         "dew": {file: SURFACE_WIND, label: "Dew Point @ Surface", scalar: {
-            file: "data/current-dewpoint-surface-level-gfs-0.25.json",
+            file: DATA_ROOT + "current-dewpoint-surface-level-gfs-0.25.json",
             lut: colormapLut(d3.interpolatePuBuGn),
             min: 233.15, max: 308.15,  // -40 – 35 °C
             scaleLabel: "-40 &ndash; 35 &deg;C",
             format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
-        }}
+        }},
+        "ocean": {file: OCEAN_CURRENTS, label: "Ocean Currents @ Surface",
+            credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
+            landFill: true,  // charcoal continents above the overlay, nullschool-style
+            particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
+            scalar: CURRENT_SPEED_SCALAR},
+        // 25.21 m: near the base of the tropical mixed layer — the flow starts diverging
+        // from the wind-driven surface drift (user pick, was 109.73 m).
+        "ocean25": {file: DATA_ROOT + "current-ocean-currents-25m-cmems-0.25.json",
+            label: "Ocean Currents @ 25 m",
+            credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
+            landFill: true,
+            particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
+            scalar: CURRENT_SPEED_SCALAR},
+        "sst": {file: OCEAN_CURRENTS, label: "Sea Water Temperature @ Surface",
+            credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
+            landFill: true,
+            particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
+            scalar: {
+                file: DATA_ROOT + "current-ocean-temp-cmems-0.25.json",
+                // Same bwr diverging scheme as the Atmosphere temperature layer. Upper
+                // limit pinned at 35 °C (user's spec — the ocean never gets hotter, so a
+                // 50 °C ceiling wasted the red half). thetao is already °C. Values outside
+                // the domain pin to the end colors — the LUT index is clamped.
+                lut: colormapLut(bwrInterpolator),
+                min: 0, max: 35,
+                scaleLabel: "0 &ndash; 35 &deg;C",
+                format: function (v) { return v.toFixed(1) + " °C"; }
+            }},
+        "waves": {file: WAVE_FLOW, label: "Ocean Waves",
+            credit: WAVE_CREDIT, dateLabel: WAVE_DATE_LABEL,
+            landFill: true,
+            particles: WAVE_PARTICLES, flowFormat: seconds,
+            scalar: {
+                file: DATA_ROOT + "current-ocean-wave-height-gfswave-0.25.json",
+                alpha: OCEAN_ALPHA,
+                // Significant wave height, blue → light blue → yellow → orange → saffron
+                // (user spec): calm seas deep blue, 15 m saffron; higher values clip to
+                // saffron via the clamped LUT index.
+                lut: segmentedLut([
+                    [0.0, [12, 44, 132]],
+                    [4.0, [110, 175, 225]],
+                    [8.0, [240, 228, 110]],
+                    [11.5, [255, 165, 0]],
+                    [15.0, [255, 103, 31]]
+                ], 0, 15),
+                min: 0, max: 15,
+                scaleLabel: "0 &ndash; 15 m",
+                format: function (v) { return v.toFixed(1) + " m"; }
+            }}
     };
     var DEFAULT_LAYER = "surface";
+    var DEFAULT_CREDIT = "GFS 0.25&deg; &nbsp;|&nbsp; NCEP / US National Weather Service";
+    var DEFAULT_PARTICLES = {velocityScale: VELOCITY_SCALE, maxIntensity: MAX_INTENSITY};
+    var KMH = function (v) { return (v * 3.6).toFixed(0) + " km/h"; };  // default flow readout
 
     var currentCancel = {requested: false};
     var recomputeTimer = null;
     var grid = null;
     var scalarGrid = null;    // secondary scalar field of the current layer, or null
     var overlaySpec = null;   // the current layer's scalar spec, or null (= wind-speed overlay)
+    var particleOpts = DEFAULT_PARTICLES;  // the current layer's animation tuning
+    var landFill = false;     // charcoal land above the overlay (ocean layers)
+    var flowFormat = KMH;     // click-readout format for the particle flow's speed
 
     function cancelWork() {
         currentCancel.requested = true;
@@ -840,12 +1041,23 @@
         document.querySelectorAll(".layer[data-layer]").forEach(function (b) {
             b.classList.toggle("active", b.dataset.layer === id);
         });
+        // Reveal the tab that owns the layer (matters when booting via #layer=…).
+        var activeBtn = document.querySelector('.layer[data-layer="' + id + '"]');
+        var body = activeBtn && activeBtn.closest(".tab-body");
+        if (body) {
+            document.querySelectorAll("#tabs .tab").forEach(function (t) {
+                t.classList.toggle("active", t.dataset.tab === body.dataset.tab);
+            });
+            document.querySelectorAll(".tab-body").forEach(function (b) {
+                b.hidden = b !== body;
+            });
+        }
         setStatus("downloading data…");
         var fetches = [fetch(layer.file, {cache: "no-cache"}).then(function (r) {
             if (!r.ok) throw new Error("wind data: HTTP " + r.status);
             return r.json();
         })];
-        if (layer.scalar) {
+        if (layer.scalar && layer.scalar.file) {
             fetches.push(fetch(layer.scalar.file, {cache: "no-cache"}).then(function (r) {
                 if (!r.ok) throw new Error("overlay data: HTTP " + r.status);
                 return r.json();
@@ -854,9 +1066,14 @@
         Promise.all(fetches).then(function (results) {
             grid = buildGrid(results[0]);
             overlaySpec = layer.scalar || null;
-            scalarGrid = layer.scalar ? buildScalarGrid(results[1]) : null;
+            scalarGrid = results.length > 1 ? buildScalarGrid(results[1]) : null;
+            particleOpts = layer.particles || DEFAULT_PARTICLES;
+            landFill = !!layer.landFill;
+            flowFormat = layer.flowFormat || KMH;
             drawScaleBar();
-            document.getElementById("data-date").textContent = "Data: GFS analysis, " + formatDate(grid.date);
+            document.getElementById("data-label").innerHTML = layer.credit || DEFAULT_CREDIT;
+            document.getElementById("data-date").textContent =
+                (layer.dateLabel || "Data: GFS analysis, ") + formatDate(grid.date);
             recompute();
         }).catch(function (err) {
             console.error(err);
@@ -989,7 +1206,10 @@
                 lakesLo: topojson.feature(topo, topo.objects.lakes_110m),
                 // a !== b keeps only shared (internal) borders; coastlines are drawn separately
                 bordersHi: topojson.mesh(c50, c50.objects.countries, function (a, b) { return a !== b; }),
-                bordersLo: topojson.mesh(c110, c110.objects.countries, function (a, b) { return a !== b; })
+                bordersLo: topojson.mesh(c110, c110.objects.countries, function (a, b) { return a !== b; }),
+                // all countries merged into one landmass, for the ocean layers' charcoal fill
+                landHi: topojson.merge(c50, c50.objects.countries.geometries),
+                landLo: topojson.merge(c110, c110.objects.countries.geometries)
             };
             drawMap(false);
             loadLayer(layerId);
