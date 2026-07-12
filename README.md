@@ -482,8 +482,9 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   lives here in Changes). Dead-code audit found none: every function and top-level
   constant in `wind.js`/`menu.js` and every script import is referenced.
 - **History rewritten with `git filter-repo`** to drop the pre-split data blobs from
-  all commits (JSON packs tightly — `.git` went 49 → ~15 MB, not the raw ~100 MB/snapshot);
-  force-pushed. Old clones must be re-cloned; commit hashes before this point changed.
+  all commits: `.git` went 49 MB → 1.9 MB; one pure data-refresh commit became empty and
+  was pruned (47 → 46 commits). Force-pushed. Old clones must be re-cloned; all commit
+  hashes changed.
 
 2026-07-12, on `main` (data/code split — Cloudflare R2):
 
