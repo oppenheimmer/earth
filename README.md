@@ -405,6 +405,9 @@ burger can't be clicked headlessly; screenshot the open state by temporarily rem
    - Automate data refresh (e.g., a GitHub Action running `scripts/refresh_wind.py` +
      `refresh_waves.py` (anonymous) and `refresh_ocean.py` (CMEMS secrets) every 6 h
      and redeploying) — otherwise the deployed snapshot goes stale from deploy day.
+     A full step-by-step Vercel + Actions guide (project `earth`, secrets handling,
+     ready-to-paste workflow YAML) lives at `~/Documents/earth-vercel-deploy.md`
+     (deliberately outside the repo, 2026-07-12).
    - Touch pinch-zoom (only wheel zoom is implemented). A read-only URL-hash initial view
      already exists (`#rotate=λ,φ&zoom=k`, e.g. `#rotate=-128.5,-21.5&zoom=5` centers the
      typhoon; also the headless-testing hook) — writing the hash back on interaction like the
@@ -443,6 +446,15 @@ via the `#layer=<id>` hash before merging with `--no-ff`.
   and prompt merges are the cure.
 
 ## Changes
+
+2026-07-12, on `main` (wave-dash lifecycle):
+
+- **Softer crest lifecycle** — maxAge 12 → 20, fade 0.6 → 0.72: dashes were blinking in
+  and out too fast (user feedback); they now ease in/out over a longer life, still without
+  smearing thanks to the near-static march speed.
+- **Vercel deployment guide** written to `~/Documents/earth-vercel-deploy.md` (kept outside
+  the repo on purpose): Vercel project `earth` serving `public/`, GitHub Actions 6-hourly
+  refresh workflow, CMEMS secrets as Actions repository secrets, repo-size strategy.
 
 2026-07-12, on `main` (wave-layer redesign, third round — combined map):
 

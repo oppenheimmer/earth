@@ -882,8 +882,11 @@
     // flickering crest field with no trailing smear. Magnitudes are periods (~5–20 s);
     // deep-water phase speed grows with period, so the low brightnessFloor makes faster
     // waves visibly brighter than slow chop. Speed history: 1/12000 → ×0.10 → ×⅓ again.
+    // maxAge 20 / fade 0.72 (was 12 / 0.6): dashes were blinking in and out too fast —
+    // a longer life and gentler per-frame fade give each crest a soft ease-in/out while
+    // the near-static march keeps them from smearing into streaks.
     var WAVE_PARTICLES = {velocityScale: 1 / 360000, maxIntensity: 22, multiplier: 3,
-        lineWidth: 2.5, maxAge: 12, fade: 0.6, crestLength: 4.5, brightnessFloor: 40};
+        lineWidth: 2.5, maxAge: 20, fade: 0.72, crestLength: 4.5, brightnessFloor: 40};
     var LAYERS = {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
         "1000hpa": {file: "data/current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
