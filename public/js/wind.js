@@ -842,7 +842,7 @@
     // topologies (earth-topo, countries) stay in the repo and always load relative.
     // Resolution order: #data=<url> hash override (for testing a bucket before wiring
     // it in) → local files when served from localhost/file: → the R2 public URL.
-    var R2_DATA_ROOT = "https://YOUR-R2-PUBLIC-URL/";  // ← set to the bucket's public base URL
+    var R2_DATA_ROOT = "https://pub-a466e24811b54104b700c58717968aab.r2.dev/";  // ← set to the bucket's public base URL
     var DATA_ROOT = (function () {
         var override = new URLSearchParams(location.hash.slice(1)).get("data");
         if (override) return override.replace(/\/?$/, "/");
