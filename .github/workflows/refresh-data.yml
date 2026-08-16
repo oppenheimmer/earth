@@ -1,0 +1,64 @@
+name: refresh-data
+on:
+  schedule:
+    - cron: "45 */6 * * *"   # fires 6-hourly; the gate job picks daily vs 6h
+  workflow_dispatch: {}       # manual "Run workflow" button, always runs
+permissions:
+  contents: read
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false   # never kill a half-finished upload
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        env:
+          CADENCE: ${{ vars.REFRESH_CADENCE || 'daily' }}
+        run: |
+          # daily (default): only the ~00:45 UTC firing passes (hour < 6
+          # allows for GitHub's cron start delays); 6h: every firing passes;
+          # manual dispatch always passes.
+          if [ "${{ github.event_name }}" != "schedule" ] \
+             || [ "$CADENCE" = "6h" ] \
+             || [ "$(date -u +%H)" -lt 6 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "REFRESH_CADENCE=$CADENCE — skipping this 6-hour slot"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+  refresh:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20   # observed runtime ~4 min; kills a hung run well before the next slot
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install GRIB + CMEMS tooling
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libeccodes-dev   # pygrib's GRIB decoder backend
+          pip install pygrib numpy copernicusmarine
+      - name: Refresh GFS atmosphere (anonymous)
+        run: |
+          for p in surface 1000hpa 500hpa 10hpa temperature rh dew; do
+            python scripts/refresh_wind.py "$p"
+          done
+      - name: Refresh GFS-Wave (anonymous)
+        run: python scripts/refresh_waves.py
+      - name: Refresh CMEMS ocean (credentials)
+        env:
+          COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
+          COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
+        run: python scripts/refresh_ocean.py
+      - name: Upload to R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: ./scripts/upload_data.sh

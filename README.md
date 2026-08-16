@@ -51,10 +51,12 @@ After editing `wind.js` or `menu.js`, reload hard (Ctrl+Shift+R) — there is no
 the script tags. Data fetches use `{cache: "no-cache"}`, so refreshed datasets appear on a plain
 reload.
 
-Deployment: Vercel serves `public/` (`vercel.json` sets `outputDirectory` and cache headers) and
-the weather JSONs come from a Cloudflare R2 bucket. The full runbook — bucket, CORS, secrets,
-ready-to-paste refresh workflow — lives in `earth-vercel-deploy.md` at the repo root, which is
-**git-ignored on purpose** (it holds the live bucket URL and ops notes).
+Deployment: live at **[globe-climatesim.vercel.app](https://globe-climatesim.vercel.app)**. Vercel
+serves `public/` (`vercel.json` sets `outputDirectory` and cache headers), the weather JSONs come
+from a Cloudflare R2 bucket, and `.github/workflows/refresh-data.yml` refreshes them daily without
+touching git ([Automated refresh](#automated-refresh)). The full runbook — bucket, CORS, secrets,
+cadence toggle, maintenance playbook — lives in `earth-vercel-deploy.md` at the repo root, which is
+**git-ignored on purpose** (it holds ops notes and credentials handling).
 
 ## Project structure
 
@@ -66,6 +68,8 @@ ready-to-paste refresh workflow — lives in `earth-vercel-deploy.md` at the rep
 ├── earth-vercel-deploy.md       # deployment runbook — git-ignored, local only
 ├── asset/view.png               # the screenshot above
 ├── .env/                        # git-ignored credentials: copernicusmarine, r2
+├── .github/workflows/
+│   └── refresh-data.yml         # daily refresh of all 12 datasets → R2 (no commits, no deploys)
 ├── scripts/
 │   ├── refresh_wind.py          # GFS winds + 2 m scalars via NOMADS, pygrib (anonymous)
 │   ├── refresh_ocean.py         # CMEMS currents + thetao via copernicusmarine (credentialed)
@@ -291,16 +295,25 @@ once at load:
 3. `R2_DATA_ROOT` — a constant at the top of the orchestration section, set to the bucket's
    public base URL.
 
-Both paths are verified: localhost serving from `data/`, and a cross-origin CORS bucket via
-`#data=`. The consequence that matters: data refreshes create no commits, no force-pushes and no
-Vercel deploys — the repo carries no history churn and Vercel only redeploys on code pushes.
+All three paths are verified: localhost serving from `data/`, a cross-origin bucket via `#data=`,
+and — since 2026-08-17 — the deployed site itself, where `data/current-*.json` 404s on the Vercel
+origin and every weather fetch resolves to the bucket. The consequence that matters: data refreshes
+create no commits, no force-pushes and no Vercel deploys — the repo carries no history churn and
+Vercel only redeploys on code pushes.
 
 `scripts/upload_data.sh` ships the files to R2 over the S3-compatible API with the AWS CLI
-(`--cache-control "public, max-age=1800, must-revalidate"`; Cloudflare's edge compresses JSON on
-the fly, so ~10 MB files travel as ~2.5 MB). It globs `current-*.json`, so a dataset added by a
-future layer is picked up automatically. Required environment (locally from the git-ignored
-`.env/r2`): `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `R2_BUCKET`
-(default `earth-data`).
+(`--cache-control "public, max-age=1800, must-revalidate"`). It globs `current-*.json`, so a
+dataset added by a future layer is picked up automatically. Required environment (locally from the
+git-ignored `.env/r2`): `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional
+`R2_BUCKET` (default `earth-data`).
+
+**The r2.dev URL does not compress.** An earlier note here claimed Cloudflare's edge gzips the
+JSON on the fly (~10 MB → ~2.5 MB); measured on 2026-08-17 that is false for the development
+URL — both `curl --compressed` and an explicit `Accept-Encoding: gzip` return the full raw body
+with no `Content-Encoding`. So every layer switch pulls its dataset uncompressed: ~100 MB for a
+click-through of all 12. Vercel *does* serve the code and topologies with `content-encoding: br`;
+Brotli for the weather files needs a **bucket custom domain** in front of R2 ([Next
+steps](#next-steps)).
 
 ### The twelve datasets
 
@@ -383,10 +396,30 @@ skip the download. `refresh_ocean.py` with no product argument refreshes all thr
 and logs a per-product progress/summary report (dataset, dimensions, selected record and depth,
 ocean-vs-NaN cell counts, timings, output size).
 
-The data on screen is a static snapshot: it only advances when a refresh script runs, so
-"most recent by default" becomes true unattended once the GitHub Action in
-[Next steps](#next-steps) is live. The HUD's `Data:` line always shows the loaded snapshot's own
+The data on screen is a static snapshot: it only advances when a refresh script runs — unattended,
+that means the workflow below. The HUD's `Data:` line always shows the loaded snapshot's own
 timestamp, whatever its age.
+
+### Automated refresh
+
+`.github/workflows/refresh-data.yml` runs the three refresh scripts and then `upload_data.sh`, so
+new data reaches production without a commit, a force-push or a Vercel deploy. It never needs write
+access to the repo (`permissions: contents: read`), and `concurrency` keeps a slow run from racing
+the next firing into a half-finished upload.
+
+- **Cadence: daily.** The cron fires 6-hourly but a `gate` job passes only the ~00:45 UTC slot
+  (`hour < 6`, allowing for GitHub's habitual cron lateness). Set the repo *variable*
+  `REFRESH_CADENCE=6h` to let every slot through — no workflow edit. `workflow_dispatch` always
+  passes the gate, so a manual **Run workflow** refreshes on demand.
+- **Secrets** (repository scope, Actions): `COPERNICUSMARINE_SERVICE_USERNAME` /
+  `_PASSWORD` for CMEMS, plus `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` for the
+  upload. GFS and GFS-Wave are anonymous. Vercel gets none of these — the site is fully static.
+- **Failure shape:** the upload step runs last, so a CMEMS outage or login failure uploads
+  *nothing* rather than shipping a half-refreshed set; the bucket keeps serving the previous
+  snapshot and the site never breaks, it just ages.
+- **Runtime ~4 minutes** for all 12 datasets (measured 3m49s and 3m48s over two runs). The CMEMS
+  ARCO reads are much faster from GitHub's runners than locally — the runbook's old 10–20 min
+  estimate was wrong — so `timeout-minutes: 20` is already generous.
 
 ### Credentials
 
@@ -412,6 +445,10 @@ Never print or commit these; `.env/` is git-ignored.
   skipped an empty 00z and used the previous day's 18z.
 - The 0.5° GFS product is named `pgrb2full.0p50` while the 0.25° one is plain `pgrb2` — an easy
   404 if the resolution ever changes.
+- `refresh_wind.py` **does not validate its product argument**: an unrecognized word falls through
+  to `surface` and is then consumed as a *local GRIB path*, so a typo fails deep inside pygrib with
+  an error that never mentions the typo. The seven valid names are `surface`, `1000hpa`, `500hpa`,
+  `10hpa`, `temperature`, `rh`, `dew` — copy them, don't retype them, into any refresh loop.
 - CMEMS's shallowest depth coordinate is 0.494025 m, so asking for `[0, 1]` works but warns; the
   script uses the interval `(0.494, 0.495)` instead.
 - Dead ends already explored for ocean currents: NOMADS has no RTOFS filter, RTOFS 2ds is
@@ -492,15 +529,15 @@ Each entry is root cause → fix, with how it was verified.
 
 ## Next steps
 
-- **Automate the data refresh.** A GitHub Action running `refresh_wind.py` + `refresh_waves.py`
-  (anonymous) and `refresh_ocean.py` (CMEMS secrets), then `upload_data.sh` straight to R2 — no
-  commits, no Vercel redeploys. Cadence is **once daily by default** (matching CMEMS's own update
-  rate); the repo variable `REFRESH_CADENCE=6h` switches every dataset to a 6-hourly cadence
-  without a workflow edit, via a gate job that filters the 6-hourly cron firings. R2 is fully set
-  up (bucket, public URL, CORS, token, all 12 objects uploaded, `R2_DATA_ROOT` wired into
-  `wind.js`). Remaining, one-time and user-side: import the Vercel project, add the five Actions
-  secrets (plus the optional cadence variable), and commit the workflow YAML. Ready-to-paste YAML
-  and the step-by-step recipe are in the local `earth-vercel-deploy.md`.
+- **Confirm the cadence gate's skip path.** The daily-pass and manual-dispatch paths are proven by
+  the first run; the *skip* branch has only been dry-run tested. Any non-00:45 UTC firing should
+  appear as a ~5 s green gate-only run logging `REFRESH_CADENCE=daily — skipping this 6-hour slot`.
+  Also note GitHub disables cron in repos idle for 60 days (public repos get a warning email first).
+- **Bucket custom domain.** The r2.dev development URL is rate-limited by Cloudflare, documented as
+  not-for-production, and serves the weather JSONs **uncompressed** ([Data/code
+  split](#datacode-split)). A custom domain in front of the bucket buys Brotli/gzip and drops the
+  limit; switching is a one-line `R2_DATA_ROOT` change, and the old URL keeps working during the
+  transition.
 - **Depth-level ocean layers.** Both CMEMS datasets carry 50 levels; 15.8 m, 109.7 m and 453.9 m
   are natural picks. One `PRODUCTS` entry (depth bracket) + one `LAYERS` entry + one menu button
   each.
@@ -509,11 +546,47 @@ Each entry is root cause → fix, with how it was verified.
 - **Small cleanups.** `LAYERS[].label` is documentation only — the HUD never reads it (the credit
   line comes from `credit`/`DEFAULT_CREDIT`), so either wire it in or drop it. `.soon` and
   `.layer:disabled` in `styles.css` are leftovers from the "Temperature soon" placeholder and no
-  longer match any markup.
-- **Local venv is disposable.** It has lived in a `/tmp` scratchpad and is wiped by a reboot;
-  recreate with `~/.venvs/aws/bin/pip install --upgrade pygrib numpy copernicusmarine awscli`.
+  longer match any markup. `#location`'s placeholder is hardcoded in `index.html` as "click a point
+  for wind speed", so every ocean and wave layer invites a click for wind speed until the first
+  click replaces it.
+- **Local venv is disposable.** `~/.venvs/aws` holds pygrib, numpy, copernicusmarine and the AWS
+  CLI, and nothing depends on it surviving — the workflow builds its own on every run. Recreate with
+  `python3 -m venv ~/.venvs/aws && ~/.venvs/aws/bin/pip install --upgrade pygrib numpy
+  copernicusmarine awscli` (the system Python is PEP-668 managed, so a plain `pip3 install` fails).
 
 ## Changes
+
+### 2026-08-17
+
+- **Deployed to Vercel**, production at `globe-climatesim.vercel.app` — imported as a static project
+  with no build step, since `vercel.json` supplies `outputDirectory: public`. Verified in production:
+  all **11 layers** render headlessly; static assets come from Vercel with the intended cache headers
+  and `content-encoding: br`; `data/current-*.json` 404s on the Vercel origin, which proves the
+  rendered fields came from R2; the HUD reports the loaded snapshot with an empty `#status`.
+- **Refresh workflow added** (`.github/workflows/refresh-data.yml`) and the five Actions secrets
+  set at repository scope. Two changes from the runbook's draft: `refresh_ocean.py` is now invoked
+  once (its all-products mode replaced the per-product loop) and `permissions: contents: read` is
+  explicit rather than inherited.
+- **R2 overwrite path re-verified**: a re-upload of all 12 objects advanced `Last-Modified` while
+  the embedded `refTime` stayed at GFS 15 Aug 06z — the local files had been regenerated from the
+  same cycle. Worth remembering: **`Last-Modified` alone does not prove fresher data**; `refTime`
+  is the ground truth.
+- **Corrected the edge-compression claim.** The r2.dev URL serves the weather JSONs with no
+  `Content-Encoding` under either `--compressed` or an explicit `Accept-Encoding: gzip`, so the
+  "~10 MB → ~2.5 MB" note was wrong; Brotli for the data needs a bucket custom domain, now a
+  [Next step](#next-steps).
+- **Documented two footguns** found while wiring the workflow: `refresh_wind.py` silently treats an
+  unrecognized product name as a local GRIB path, and `#location`'s hardcoded placeholder mentions
+  wind speed on every layer.
+- **First workflow run green** (manual dispatch, 3m49s): gate passed in 3 s, every refresh step
+  succeeded — including the CMEMS login, the only credential that had never been exercised — and all
+  12 objects' `refTime` advanced, GFS/GFS-Wave **15 Aug 06z → 16 Aug 12z** and CMEMS **15 → 16 Aug**
+  daily mean. The live HUD followed without a hard reload (`{cache: "no-cache"}` revalidates), and
+  the run produced no commit, no force-push and no Vercel deploy, as designed.
+- **Runner actions bumped** `actions/checkout@v4` → `@v7` and `actions/setup-python@v5` → `@v7`
+  (both `node24`), and `timeout-minutes` 45 → 20 now that the real runtime is known. Confirmed by a
+  second dispatch: same 14 steps green in 3m48s with **no annotations**, against the Node 20
+  deprecation warning the v4/v5 run carried — so the scheduled path runs a tested configuration.
 
 ### 2026-08-16
 
