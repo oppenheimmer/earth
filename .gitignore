@@ -8,3 +8,7 @@ __pycache__/
 # Weather data is not versioned: refresh scripts write it here for local dev,
 # scripts/upload_data.sh ships it to the Cloudflare R2 bucket for production.
 public/data/current-*.json
+.vscode/
+# Deployment runbook: kept local only (holds the live bucket URL + ops notes),
+# deliberately out of the public repo.
+earth-vercel-deploy.md

@@ -2,651 +2,657 @@
 
 ![earth](./asset/view.png)
 
-A minimal replica of the meteorological visualization from
-[earth.nullschool.net](https://earth.nullschool.net/).The core algorithms are ported from [cambecc/earth](https://github.com/cambecc/earth) (MIT):
+A minimal replica of the meteorological visualization at
+[earth.nullschool.net](https://earth.nullschool.net/): an orthographic globe with a colored
+scalar field and thousands of particles advected through a live vector field. Eleven layers
+across two domains (Atmosphere, Ocean) are driven by NOAA GFS, NOAA GFS-Wave and Copernicus
+Marine (CMEMS) data.
 
-- **GFS grid interpolation** — bilinear interpolation of u/v wind components on a 0.25°×0.25° global grid
-- **Projection distortion** — wind vectors are warped by the orthographic projection's local derivatives, so particle motion looks correct everywhere on the globe
-- **Sinebow overlay** — the globe surface is colored by wind speed using earth's extended sinebow color scale (0–100 m/s), pastelized 22% toward white (the raw sinebow's saturated storm band renders brown over a dark map; nullschool's modern palette is lighter)
-- **Particle animation** — thousands of particles advected through the field, drawn as fading grayscale trails bucketed by intensity
+The site is static — four stacked canvases, vanilla JS, vendored D3 v7 + topojson-client, no
+build step, no framework. The core algorithms are ported from
+[cambecc/earth](https://github.com/cambecc/earth) (MIT):
 
+- **Grid interpolation** — bilinear interpolation of u/v components on a regular lat/lon grid
+  (0.25°×0.25° globally), NaN-tolerant so fields with land holes reach their coastline.
+- **Projection distortion** — flow vectors are warped by the orthographic projection's local
+  derivatives, so particle motion looks correct everywhere on the globe.
+- **Sinebow overlay** — the sphere is colored by wind speed through earth's extended sinebow
+  scale (0–100 m/s), pastelized 22% toward white; the raw sinebow's saturated storm band
+  renders brown over a dark map, while nullschool's modern palette is lighter.
+- **Particle animation** — thousands of particles advected through the field, drawn as fading
+  trails bucketed by intensity.
+
+## Quick start
+
+```sh
+./start.sh            # serves public/ on http://localhost:8420 and opens a browser
+```
+
+Any static server works — `start.sh` is just
+`python3 -m http.server 8420 -d public` plus an `xdg-open`.
+
+The twelve weather datasets are **not in the repo** ([Data](#data)). For a working local page,
+either refresh them into `public/data/` (see [Refreshing the data](#refreshing-the-data)) or
+borrow the deployed bucket with the `#data=` hash below.
+
+All URL-hash options are read once at load and can be combined with `&`:
+
+| Hash | Meaning |
+|---|---|
+| `#layer=<id>` | initial layer: `surface`, `1000hpa`, `500hpa`, `10hpa`, `temperature`, `rh`, `dew`, `ocean`, `ocean25`, `sst`, `waves` |
+| `#rotate=λ,φ` | initial center, e.g. `#rotate=-128.5,-21.5` (φ clamped to ±90°) |
+| `#zoom=k` | initial zoom, 0.5–8× the fitted scale |
+| `#data=<url>` | fetch the weather JSONs from this base URL instead of local files / R2 |
+
+`#layer=` and `#rotate=`/`#zoom=` are also the headless-testing hooks: the burger menu needs a
+real click, and a specific view can otherwise only be reached by dragging.
+
+After editing `wind.js` or `menu.js`, reload hard (Ctrl+Shift+R) — there is no cache-busting on
+the script tags. Data fetches use `{cache: "no-cache"}`, so refreshed datasets appear on a plain
+reload.
+
+Deployment: Vercel serves `public/` (`vercel.json` sets `outputDirectory` and cache headers) and
+the weather JSONs come from a Cloudflare R2 bucket. The full runbook — bucket, CORS, secrets,
+ready-to-paste refresh workflow — lives in `earth-vercel-deploy.md` at the repo root, which is
+**git-ignored on purpose** (it holds the live bucket URL and ops notes).
 
 ## Project structure
 
 ```
 .
 ├── vercel.json                  # points Vercel's output at public/, sets cache headers
+├── start.sh                     # local launcher: serves public/ on :8420, opens a browser
 ├── README.md
-├── start.sh                     # local launcher: serves public/ on :8420 and opens browser
+├── earth-vercel-deploy.md       # deployment runbook — git-ignored, local only
+├── asset/view.png               # the screenshot above
+├── .env/                        # git-ignored credentials: copernicusmarine, r2
 ├── scripts/
-│   ├── refresh_wind.py          # GFS data refresh, pygrib-based (verified working)
-│   ├── refresh_ocean.py         # CMEMS ocean-current refresh via copernicusmarine toolbox (creds: .env/)
-│   ├── refresh_waves.py         # GFS-Wave (WAVEWATCH III) waves refresh via NOMADS, anonymous
-│   └── upload_data.sh           # ships public/data/current-*.json to the Cloudflare R2 bucket (creds: .env/r2)
+│   ├── refresh_wind.py          # GFS winds + 2 m scalars via NOMADS, pygrib (anonymous)
+│   ├── refresh_ocean.py         # CMEMS currents + thetao via copernicusmarine (credentialed)
+│   ├── refresh_waves.py         # GFS-Wave (WAVEWATCH III) height/period/direction (anonymous)
+│   └── upload_data.sh           # ships public/data/current-*.json to the Cloudflare R2 bucket
 └── public/                      # the deployable site (code + static assets only)
-    ├── index.html               # four stacked canvases (#map, #overlay, #lines, #animation) + burger-menu HUD
+    ├── index.html               # four stacked canvases (#map, #overlay, #animation, #lines) + HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
-    ├── js/wind.js               # the whole engine (~1150 lines, no build step)
-    ├── js/menu.js               # burger-menu toggle, tab switching, layer-change dispatch (~40 lines)
+    ├── js/wind.js               # the whole engine (~1220 lines, one IIFE)
+    ├── js/menu.js               # burger toggle, tab switching, layerchange dispatch (~40 lines)
     ├── libs/
-    │   ├── d3.v7.min.js         # vendored D3 v7
+    │   ├── d3.v7.min.js         # vendored D3 v7 (includes d3-scale-chromatic)
     │   └── topojson-client.min.js
     └── data/
-        ├── current-*.json       # 12 weather datasets — GIT-IGNORED since 2026-07-12 (data/code
-        │                        #   split): refresh scripts write them here for local dev,
-        │                        #   upload_data.sh ships them to Cloudflare R2 for production;
-        │                        #   js/wind.js picks local vs R2 by hostname (see Data section)
+        ├── current-*.json       # the 12 weather datasets — GIT-IGNORED (data/code split):
+        │                        #   refresh scripts write them here for local dev,
+        │                        #   upload_data.sh ships them to Cloudflare R2 for production,
+        │                        #   wind.js picks local vs R2 by hostname (see Data)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m) — in git
-        ├── countries-50m.json   # world-atlas@2 countries topology (political borders, idle detail)
-        └── countries-110m.json  # world-atlas@2 countries topology (borders while dragging)
+        ├── countries-50m.json   # world-atlas@2 countries topology (borders + land, idle detail)
+        └── countries-110m.json  # world-atlas@2 countries topology (borders + land, while dragging)
 ```
 
-The 12 weather files and their shapes (all grib2json format, ~97 MB total): 4× GFS u/v wind
-(`current-wind-{surface-level,1000hpa,500hpa,10hpa}-gfs-0.25.json`, ~9–10 MB each), 3× GFS 2 m
-scalars (`current-{temp,rh,dewpoint}-surface-level-gfs-0.25.json`, ~5–6 MB), 2× CMEMS current
-u/v at 0.494 m / 25.211 m (`current-ocean-currents{,-25m}-cmems-0.25.json`, ~11 MB), CMEMS
-thetao (`current-ocean-temp-cmems-0.25.json`, ~6 MB), GFS-Wave propagation u/v with |v| =
-peak period (`current-ocean-waves-gfswave-0.25.json`, ~10 MB) and significant wave height
-(`current-ocean-wave-height-gfswave-0.25.json`, ~5 MB).
+The topologies are static assets, not data: they stay in git and always load relative to the
+page, never through the R2 root.
 
-## How it works (rendering pipeline in `js/wind.js`)
+## How it works
 
-1. **Load** — fetches the wind JSON and three topologies in parallel; `buildGrid()` indexes the
-   two GFS records (u: parameterCategory 2 / parameterNumber 2, v: 2/3) into a 1440×721 grid with
-   a duplicated wrap-around column, exposing `interpolate(λ, φ)` (bilinear; grid geometry is read
-   from the header, so any regular lat/lon resolution works). Rows are flat Float32Arrays
-   ([u0, v0, u1, v1, …]) — at 0.25° the grid exceeds 1M cells and per-cell JS arrays would cost
-   hundreds of MB. Political borders are derived with
-   `topojson.mesh(countries, (a, b) => a !== b)` — internal boundaries only, coastlines excluded.
-2. **Map layers** — orthographic projection (`d3.geoOrthographic`, clip angle 90°). Sphere fill
-   and graticule draw on `#map` *below* the color overlay; coastlines (1.6 px, full white),
-   country borders and lakes draw on `#lines` *above* it — beneath the 0.72-alpha overlay the
-   outlines dimmed to ~30% and vanished behind the trails. Uses 110m geometry while dragging,
-   50m when idle. Both rendered at devicePixelRatio for crisp lines.
-3. **Mask** — the sphere is filled with a sentinel color (magenta, unreachable by the sinebow
-   scale) on an offscreen canvas; its imageData tells the interpolator which pixels are on the
-   globe (alpha > 0) and later doubles as the overlay image.
+Everything lives in `public/js/wind.js` — one IIFE, no modules, sectioned as color scales →
+grids → projection → canvases → mask/field → drag preview → animation → HUD → orchestration →
+boot. `public/js/menu.js` only translates clicks into events; the engine owns all state.
+
+### Rendering pipeline
+
+1. **Load** — `init()` fetches the three topologies in parallel, builds the meshes, then
+   `loadLayer()` fetches the active layer's flow dataset (plus its scalar dataset, if any).
+   `buildGrid()` indexes the two flow records (u: `parameterCategory` 2 / `parameterNumber` 2,
+   v: 2/3) into a `nj`-row grid with a duplicated wrap-around column and exposes
+   `interpolate(λ, φ)`. Grid geometry comes from the header (`nx`, `ny`, `lo1`, `la1`, `dx`,
+   `dy`), so any regular lat/lon resolution and either 0°/-180° origin works. Rows are flat
+   `Float32Array`s (`[u0, v0, u1, v1, …]`) — at 0.25° the grid exceeds 1M cells and per-cell JS
+   arrays would cost hundreds of MB. The bilinear is NaN-tolerant: hole corners drop out and the
+   remaining weights renormalize, so color and flow reach the last valid cell instead of
+   retreating half a cell from every coast. `buildGrid()` also records the dataset's maximum
+   speed, which sizes the particle streak guard. `buildScalarGrid()` does the same for
+   single-record scalar files. Political borders come from
+   `topojson.mesh(countries, (a, b) => a !== b)` (internal boundaries only, coastlines excluded)
+   and the ocean layers' landmass from `topojson.merge` of all country polygons.
+2. **Map layers** — orthographic projection (`d3.geoOrthographic`, clip angle 90°, fitted scale
+   `min(width, height) × 0.42`). Sphere fill (`#101018`), sphere outline and graticule draw on
+   `#map` *below* the color overlay; coastlines (1.6 px, full white), country borders and lakes
+   draw on `#lines` *above* it — beneath the overlay's alpha the outlines dimmed to ~30% and
+   vanished behind the trails. Ocean layers additionally fill the merged landmass charcoal
+   (`#333338`) on `#lines`, which crops both the grid staircase and any particle that strays
+   past the coast. 110m geometry is used while dragging, 50m when idle; both canvases render at
+   `devicePixelRatio` for crisp lines.
+3. **Mask** — the sphere is filled with a sentinel color (magenta, unreachable by any of the
+   color scales) on an offscreen canvas. Its `imageData` tells the interpolator which pixels are
+   on the globe (alpha > 0) and then doubles as the overlay image.
 4. **Field interpolation** — for every 2nd pixel of the visible globe: invert-project to (λ, φ),
-   sample the wind, distort the vector by the projection's finite-difference derivatives
-   (velocity scale = `bounds.height / 60000`), and store a screen-space motion vector per pixel
-   ("columns"). Simultaneously the pixel's overlay color is written into the mask imageData using
-   the extended sinebow scale at alpha 0.5. Runs in cooperative batches (100 ms work / 25 ms
-   yield) so the UI never freezes; progress is shown in the HUD. On completion, leftover sentinel
-   pixels at the antialiased rim are erased, then the imageData is blitted to `#overlay`.
-5. **Particle animation** (`#animation` canvas) — `width × 10 × min(dpr, 2)` particles (×0.75 on
-   mobile), each advected by the field vector at its pixel, respawned after 100 frames or when it
-   exits the globe. The canvas is devicePixelRatio-scaled and strokes are 1 *device* px wide
-   (`PARTICLE_LINE_WIDTH / dpr`) for fine nullschool-like trails. Trails fade via a
-   `destination-in` fill of `rgba(0,0,0,0.97)` per frame (slower fade → long fluid streamlines);
-   segments are bucketed into 13 near-neutral intensity styles (130→255, r×0.90/b×0.92, alpha
-   0.70→0.50 falling with speed; grayscale 85→255 opaque in the original). Strokes are almost
-   white on purpose: the hue comes from the overlay bleeding through (pink over the red eyewall,
-   pale green over green) — a stronger green stroke tint muddied red zones into brown. Max
-   intensity at 25 m/s; one `beginPath` per bucket.
-   25 fps (`setTimeout`, 40 ms), matching the original. A **streak guard** respawns any particle
-   whose per-frame move exceeds what the dataset's max wind speed can produce at the current
-   zoom (×2 slack) — see [Fixed bugs](#fixed-bugs) for the sizing.
-6. **Interaction** — drag rotates (sensitivity 75/scale °/px, φ clamped to ±90°), wheel zooms
-   (0.5×–8× of the fitted scale), click reads wind speed at a point via `projection.invert` +
-   `grid.interpolate`. Any manipulation cancels the current field/animation via a shared cancel
-   token and hides the particle trails; while the pointer moves, `drawOverlayPreview()` repaints
-   the color field **live at low resolution** (every 5th px, throttled to ~25 fps, upscaled with
-   canvas smoothing) so the "smudged" overlay tracks the rotating/zooming globe outline exactly,
-   like nullschool. A 200 ms debounce after release triggers the full recompute, whose
-   `putImageData` replaces the preview wholesale. Window resize does the same, preserving
-   relative zoom. Note: the preview must mask off-disc pixels **by radius** — d3-geo clamps
-   `asin`, so `projection.invert` returns finite mirrored coordinates outside the globe.
+   sample the flow, distort the vector by the projection's finite-difference derivatives, and
+   store a screen-space motion vector per pixel ("columns", written in 2×2 blocks). The screen
+   velocity scale is `bounds.height × layer.velocityScale × (initialScale / scale)^ZOOM_SPEED_EXPONENT`.
+   Simultaneously each pixel's overlay color is written into the mask `imageData` by
+   `overlayColorAt()`, which dispatches to the layer's scalar colormap, to the flow magnitude
+   itself (`fromMagnitude` layers), or to the default wind-speed sinebow. Work runs in
+   cooperative batches (100 ms work / 25 ms yield) so the UI never freezes, with progress in the
+   HUD. On completion, leftover sentinel pixels at the antialiased rim are erased and the
+   `imageData` is blitted to `#overlay` with `putImageData`.
+5. **Particle animation** (`#animation`) — `globeBounds().width × multiplier × min(dpr, 2)`
+   particles (×0.75 on mobile), each advected by the field vector at its pixel and respawned
+   when it ages out or leaves the globe. The canvas is `devicePixelRatio`-scaled and strokes are
+   1.8 *device* px wide (`lineWidth / dpr`) for fine nullschool-like trails. Trails fade via a
+   `destination-in` fill of `rgba(0, 0, 0, fade)` per frame over the globe bounds; segments are
+   bucketed into near-neutral intensity styles (`INTENSITY_SCALE_STEP` apart, from a brightness
+   floor of 130 to 255 — 13 buckets) with one `beginPath` per bucket. Runs at 25 fps
+   (`setTimeout`, 40 ms), like the original. Two per-layer variants share the loop: long fluid
+   streamlines (winds, currents) and the wave layers' `crestLength` mode, which strokes an
+   oriented dash *perpendicular* to travel through the segment midpoint. A **streak guard**
+   respawns any particle whose per-frame move exceeds what the dataset's maximum speed can
+   produce at the current zoom (×2 slack) — see [Fixed bugs](#fixed-bugs) for the sizing.
+6. **Interaction** — drag rotates (sensitivity `75 / scale` °/px, φ clamped to ±90°, sub-3 px
+   movement stays a click), wheel zooms (`exp(-deltaY × 0.0018)`, clamped to 0.5×–8× of the
+   fitted scale), a click reads the values under the pointer via `projection.invert` +
+   `interpolate`. Any manipulation cancels the running field/animation through a shared cancel
+   token and clears the trails; while the pointer moves, `drawOverlayPreview()` repaints the
+   color field **live at low resolution** (every 5th px, throttled to ~25 fps, upscaled with
+   canvas smoothing) so the "smudged" overlay tracks the globe outline exactly, like nullschool.
+   A 200 ms debounce after release triggers the full recompute, whose `putImageData` replaces the
+   preview wholesale; a resize (250 ms debounce) does the same while preserving relative zoom.
+   Note: the preview must mask off-disc pixels **by radius** — d3-geo clamps `asin`, so
+   `projection.invert` returns finite mirrored coordinates outside the globe.
 
-### Key constants (top of `wind.js`, values taken from the original)
+### Layer registry
+
+`LAYERS` in `wind.js` maps a layer id to its flow file, optional `scalar` spec
+(`{file, lut, min, max, scaleLabel, format}` or `{fromMagnitude: true, …}`), particle tuning,
+credit/date lines, `landFill` and the click-readout format. `index.html`'s menu buttons carry
+matching `data-layer` ids. One layer is displayed at a time; layers are never combined.
+
+| Layer id | Menu button | Particles from | Overlay | Scale |
+|---|---|---|---|---|
+| `surface` | Atmosphere → Wind @ Surface | GFS 10 m u/v | wind speed, pastelized sinebow | 0 – 360 km/h |
+| `1000hpa` | Atmosphere → Wind @ 1000 hPa | GFS u/v @ 1000 hPa | 〃 | 〃 |
+| `500hpa` | Atmosphere → Wind @ 500 hPa | GFS u/v @ 500 hPa | 〃 | 〃 |
+| `10hpa` | Atmosphere → Wind @ 10 hPa | GFS u/v @ 10 hPa | 〃 | 〃 |
+| `temperature` | Atmosphere → Temperature | GFS 10 m u/v | 2 m TMP through matplotlib `bwr` | -10 – 45 °C |
+| `rh` | Atmosphere → Humidity | GFS 10 m u/v | 2 m RH through `BuPu` | 0 – 100 % |
+| `dew` | Atmosphere → Dew Point | GFS 10 m u/v | 2 m DPT through `PuBuGn` | -40 – 35 °C |
+| `ocean` | Ocean → Current-Surface | CMEMS uo/vo @ 0.494 m | current speed, segmented ocean palette | 0 – 1.5 m/s |
+| `ocean25` | Ocean → Current-25m | CMEMS uo/vo @ 25.211 m | 〃 | 〃 |
+| `sst` | Ocean → Temperature | CMEMS surface currents | CMEMS thetao through `bwr` | 0 – 35 °C |
+| `waves` | Ocean → Waves | GFS-Wave propagation u/v (magnitude = peak period) | significant wave height, blue → saffron | 0 – 15 m |
+
+Colormaps come from the vendored D3 bundle's `d3-scale-chromatic` (`colormapLut()` samples an
+interpolator into a 256-entry LUT), except `bwr` — a hand-rolled two-segment ramp — and the
+ocean/wave palettes, built by `segmentedLut()` from `[value, [r, g, b]]` stops. Values outside a
+domain pin to the end colors because the LUT index is clamped. `buildGrid()` is level-agnostic
+(records are picked by parameter category/number only), and both the streak guard and the color
+scales are data-driven, so the much faster jet-stream (500 hPa) and polar-night-jet (10 hPa)
+winds need no per-level tuning.
+
+### Key constants
+
+Top of `wind.js` unless noted; per-layer overrides live in each `LAYERS` entry's `particles`.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `OVERLAY_ALPHA` | 0.72 × 255 | overlay transparency (0.4 in the original; near-opaque like nullschool) |
-| `MAX_PARTICLE_AGE` | 100 | frames before a particle respawns |
-| `PARTICLE_MULTIPLIER` | 3.5 | particles per pixel of globe width (7 in the original), further × min(dpr, 2); low → fewer, thicker, distinct traces |
+| `OVERLAY_ALPHA` | 0.72 × 255 | atmosphere overlay opacity (0.4 in the original; near-opaque like nullschool) |
+| `OCEAN_ALPHA` | 0.58 × 255 | ocean/wave overlay opacity — calm sea stays near-black so trails and crests read on top |
+| `MAX_PARTICLE_AGE` | 100 frames | trail lifetime before respawn (waves override: `maxAge` 20) |
+| `PARTICLE_MULTIPLIER` | 3.5 | particles per px of globe width (7 in the original), × min(dpr, 2); low → fewer, thicker, distinct traces (ocean 4, waves 3) |
+| `PARTICLE_REDUCTION` | 0.75 | particle-count factor on mobile user agents |
+| `PARTICLE_LINE_WIDTH` | 1.8 device px | divided by dpr at stroke time (ocean 1.7, waves 2.5) |
 | `FRAME_RATE` | 40 ms | ~25 fps animation |
-| `MAX_INTENSITY` | 25 m/s | wind speed of brightest particle trail (17 in the original; higher cap keeps storm bands from saturating white) |
-| `VELOCITY_SCALE` | 1/42000 | particle screen speed per m/s (× globe height × zoom factor below) |
-| `ZOOM_SPEED_EXPONENT` | 0.6 | speed ∝ (initialScale/scale)^0.6: grows gently with zoom (~2× at 6×) — 1.0 made all tracks short/sparse, 0 made close-ups frantic |
+| `MAX_INTENSITY` | 25 m/s | speed of the brightest trail (17 in the original; a higher cap keeps storm bands from saturating white) — ocean 0.7 m/s, waves 22 s |
+| `VELOCITY_SCALE` | 1/42000 | particle screen speed per m/s, × globe height × zoom factor (ocean 1/1700, waves 1/360000) |
+| `ZOOM_SPEED_EXPONENT` | 0.6 | speed ∝ (initialScale/scale)^0.6 — grows gently with zoom, ~2× at 6× |
+| `MAX_PARTICLE_STEP` | 12 px | cap on the Euler step; a numerical-stability backstop, not a speed model |
+| `INTENSITY_SCALE_STEP` | 10 | brightness step between trail buckets (floor 130 → 13 buckets; waves' `brightnessFloor` 40 → 22) |
+| `MAX_TASK_TIME` / `MIN_SLEEP_TIME` | 100 / 25 ms | field-interpolation work and yield slices |
+| `OVERLAY_PREVIEW_STEP` / `_WAIT` | 5 px / 40 ms | drag-preview sampling stride and throttle |
+| `H` | 3.6e-5 ° (≈4 m) | finite-difference step for the projection distortion |
+| `NO_DATA_GRAY` | `[51, 51, 56]` | = the `#333338` land fill; ocean layers paint dataless water (Caspian, Aral, coastal grid holes) like land instead of leaving a black hole |
 
-(`PARTICLE_LINE_WIDTH` is 1.8 device px. **Particle screen speed is partially zoom-normalized**
-via `ZOOM_SPEED_EXPONENT` — full normalization (exponent 1) made every track short and sparse,
-no normalization (exponent 0) made close-ups a frantic white blaze that overshot the eyewall
-vortex; 0.6 grows speed gently with zoom and `MAX_PARTICLE_STEP` (12 px) backstops stability.
-The streak guard uses the same zoom factor. The streak-guard threshold is no longer a constant — it's computed per view from the dataset's
-max wind speed and the projection scale; see [Fixed bugs](#fixed-bugs). Particle screen speed
-deliberately grows with zoom — real-world physics seen closer up — and the guard scales the
-same way. Trail strokes use the 100→255 tinted ramp at flat 0.55 alpha and fade by
-0.97/frame — long fluid streamlines. Two de-whitening ramp experiments (ceiling 220,
-speed-dependent alpha 0.6→0.35) were tried and **reverted by user preference**: the brighter
-eyewall is accepted in exchange for the luminous long-streamline look.)
+The streak-guard threshold is *not* a constant: it is computed per view as
+`max(10 px, 2 × grid.maxSpeed × bounds.height × velocityScale × zoomFactor × pxPerDegree)`.
 
+### Tuning notes
 
+Why the numbers are what they are. All of it was settled by measurement against nullschool
+screenshots plus user review; see [Changes](#changes) for the order things happened in.
+
+- **Overlay color.** Wind speed maps onto the extended sinebow over 0–100 m/s (hence the
+  "0 – 360 km/h" scale label), pastelized 22% toward white so the storm band reads bright
+  salmon/gold instead of brown over the dark map. The calm end is blended toward deep indigo
+  `rgb(4, 1, 146)` with `t = min(v/15, 1)^1.4`, which holds the deep tone through a typical
+  3–7 m/s ocean breeze and releases into the pastel scale by 15 m/s, leaving greens and storm
+  colors untouched. The parity measurements that drove this (taken during the parity pass, at 0.5°
+  data and 0.5 overlay alpha, so they are the reasoning rather than current readings): brightness
+  0.52 against the reference's 0.53, saturation 0.69 vs 0.71, red-tint pixels 360 vs 179 — and 0
+  before the resolution upgrade, because the red band lives at ~35–45 m/s and only appears once
+  the grid is fine enough to resolve an eyewall peak.
+- **Trail color.** Strokes are almost white on purpose — `rgb(j × 0.90, j, j × 0.92)` with alpha
+  falling 0.70 → 0.50 as speed rises. The hue comes from the overlay bleeding through (pink over
+  a red eyewall, pale green over green); a stronger green stroke tint muddied red zones into
+  brown, and constant high alpha let storm cores pile up into mush.
+- **Trail shape.** Fade 0.97/frame with a 100-frame life gives long fluid streamlines. Two
+  de-whitening experiments (brightness ceiling 220, then speed-dependent alpha 0.6 → 0.35) were
+  measured and **reverted by user preference**: the brighter eyewall — ~4.8% white pixels in the
+  eyewall crop when measured, against nullschool's 0% — is accepted in exchange for the luminous
+  long-streamline look. Nullschool's 0% comes from short dashes, deliberately not adopted for the
+  wind layers.
+- **Zoom.** Particle screen speed is only *partially* normalized for zoom. Full normalization
+  (exponent 1) made every track short and sparse; none (exponent 0) made close-ups a frantic
+  white blaze that overshot tight vortices. 0.6 grows speed gently, `MAX_PARTICLE_STEP` backstops
+  stability, and the streak guard uses the same zoom factor so both stay consistent.
+- **Ocean.** Currents peak around 1.5 m/s against ~100 m/s winds, so they need ~25× the velocity
+  scale to visibly flow and a brightness ramp that saturates at 0.7 m/s. The overlay is dimmer
+  than the atmosphere's so calm ocean stays near-black and the trails read as the currents.
+- **Waves.** Crests, not traces: dashes perpendicular to travel, a very small velocity scale
+  (waves are localized and far slower than winds — the crests barely creep), a short life with a
+  fast fade so each dash eases in and out without smearing, and `brightnessFloor` 40 to widen the
+  brightness ramp. Because deep-water phase speed grows with period and the flow magnitude *is*
+  the peak period, period-brightness is speed-brightness.
+
+### HUD and menu
+
+The bottom-left HUD is collapsed by default to a slim bar (`☰ earth` plus a transient status
+line, which stays visible while collapsed so load progress and errors always show). The burger
+expands `#menu-panel` upward, nullschool-style:
+
+- **Domain tabs** stack vertically — each tab header sits directly above its own `.tab-body`, one
+  domain expanded at a time. Atmosphere holds seven layers, Ocean four; all are live.
+- **Layer buttons** dispatch a `layerchange` `CustomEvent` with the layer id.
+  `loadLayer()` in the engine swaps the dataset(s), restarts the pipeline, and syncs the
+  active-button state (single source of truth), including revealing the tab that owns the layer
+  when booting from `#layer=`.
+- **Data source and snapshot lines** (`#data-label`, `#data-date`) follow the layer's credit and
+  `dateLabel`; the date is the loaded snapshot's own valid time (`refTime + forecastTime`),
+  formatted as UTC — so the HUD always states which snapshot is on screen.
+- **Scale bar** (`#scale`) is painted from the active overlay's LUT, with `#scale-label` from its
+  `scaleLabel`; the **click readout** (`#location`) prints the scalar value · the flow value ·
+  coordinates, formatted per layer (km/h for wind, m/s for currents, "m · s" for waves).
+
+CSS gotcha: `.tab-body` uses `display: flex`, which beats the `hidden` attribute's UA-stylesheet
+`display: none` — hence the explicit `.tab-body[hidden] { display: none; }` rule. Headless
+gotcha: the burger can't be clicked, so screenshot the open panel by temporarily removing the
+`hidden` attribute from `#menu-panel`.
 
 ## Data
 
-**Data/code split (2026-07-12)**: the `current-*` weather JSONs are **not in git**. The
-refresh scripts still write them to `public/data/` (now git-ignored) so local dev works
-exactly as before; production serves them from a **Cloudflare R2 bucket** instead. In
-`js/wind.js`, every weather-file URL goes through `DATA_ROOT`, resolved once at load:
-a `#data=<url>` hash override (for testing a bucket before wiring it in — e.g.
-`#layer=waves&data=https://bucket.example/`) → local `data/` when served from
-localhost/127.x/file: → `R2_DATA_ROOT` (a constant at the top of the orchestration
-section; **set it to the bucket's public base URL after creating the bucket**). The three
-topology files stay in the repo and always load relative — they're static assets, not data.
-`scripts/upload_data.sh` ships the 12 files to R2 (S3-compatible API via the AWS CLI,
-`--cache-control max-age=1800`; Cloudflare's edge gzips JSON on the fly). Consequences:
-data refreshes no longer create commits, force-pushes, or Vercel deploys — the repo carries
-no history churn and Vercel only redeploys on code pushes. Both paths verified headlessly:
-localhost serving from `data/`, and a cross-origin CORS stand-in bucket via `#data=`.
-Full R2 + Vercel + GitHub Actions recipe: `~/Documents/earth-vercel-deploy.md`.
+### Data/code split
 
-`current-wind-surface-level-gfs-0.25.json` holds GFS 10 m surface wind (u/v,
-0.25°×0.25°, values rounded to 0.1 m/s; ~9.2 MB raw / ~2.5 MB gzipped at the edge) in grib2json
-format. **Last refreshed: GFS analysis 2026-07-11 12:00 UTC (all seven GFS datasets, one
-cycle).** Note the data is a static snapshot — it only advances when
-`refresh_wind.py` runs; the planned GitHub Action (see Next steps) is what will make "most
-recent by default" true unattended. Upgraded 1° → 0.5° → 0.25°
-(nullschool's resolution) on 2026-07-10 for aesthetic parity; before that it was the 2014-01-31
-sample shipped with cambecc/earth. The HUD's "Data:" line always shows the loaded snapshot's
-timestamp.
+The `current-*` weather JSONs are **not in git**. The refresh scripts write them to
+`public/data/` (git-ignored) so local dev works normally; production serves them from a
+**Cloudflare R2 bucket**. In `wind.js` every weather-file URL goes through `DATA_ROOT`, resolved
+once at load:
 
-Three pressure-level datasets (added 2026-07-10, all GFS analysis 2026-07-10 06:00 UTC) sit
-beside it: `current-wind-{1000hpa,500hpa,10hpa}-gfs-0.25.json` — UGRD/VGRD on isobaric
-surfaces via the same filter CGI (`lev_1000_mb`/`lev_500_mb`/`lev_10_mb`). The engine's
-`LAYERS` registry maps menu layer ids to these files; `buildGrid()` is level-agnostic
-(records are picked by parameterCategory/Number only) and the data-driven streak guard and
-color scale absorb the much faster jet-stream (500 hPa) and polar-night-jet (10 hPa) winds
-with no per-level tuning.
+1. a `#data=<url>` hash override (for testing a bucket before wiring it in, e.g.
+   `#layer=waves&data=https://bucket.example/`), then
+2. local `data/` when served from `localhost`, `127.x`, `[::1]` or `file:`, otherwise
+3. `R2_DATA_ROOT` — a constant at the top of the orchestration section, set to the bucket's
+   public base URL.
 
-Three **scalar overlay datasets** (added 2026-07-10, same 06z cycle) drive the combined
-layers: 2 m TMP / RH / DPT as single-record grib2json files
-(`current-{temp,rh,dewpoint}-surface-level-gfs-0.25.json`). A combined layer pairs surface
-wind (particle trails) with a scalar field colored through a d3-scale-chromatic colormap LUT
-(the vendored D3 bundle ships them, except bwr — hand-rolled two-segment ramp):
-**Temperature → matplotlib 'bwr' diverging (263.15–318.15 K = -10–45 °C, user-revised
-2026-07-12 from the ±50 °C symmetric domain; out-of-range pins to the end colors, white
-midpoint at 17.5 °C), Relative humidity → BuPu
-(0–100 %), Dew point → PuBuGn (233.15–308.15 K)**. Colormap history (all user-directed,
-same day): temperature inferno → reversed inferno → YlOrRd (0–50 °C floor — a -40 floor
-pushed everything visible into red) → bwr; RH Purples → BuPu for contrast. The scale bar and the
-click readout follow the active layer (`overlaySpec.format`; scalar value · wind speed).
+Both paths are verified: localhost serving from `data/`, and a cross-origin CORS bucket via
+`#data=`. The consequence that matters: data refreshes create no commits, no force-pushes and no
+Vercel deploys — the repo carries no history churn and Vercel only redeploys on code pushes.
 
-The **ocean currents layer** (`feature/OceanCurrent`, 2026-07-12) reads
-`current-ocean-currents-cmems-0.25.json`: a 2-record u/v file in the same grib2json format,
-from **CMEMS Global Ocean Physics Analysis & Forecast**
-(`cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m`, daily mean, 0.494 m depth, 1/12° strided ×4 to
-¼°) via `scripts/refresh_ocean.py` + the `copernicusmarine` toolbox. The layer has no second
-scalar file — a `fromMagnitude` overlaySpec colors the sea by current speed itself through
-cambecc's segmented ocean palette (deep blue 0 → green 0.4 → sand 0.65–1.0 → red 1.5 m/s),
-and per-layer `particles` tuning (`velocityScale` 1/2500 ≈ 17× wind, `maxIntensity` 1 m/s —
-the data-driven streak guard scales along) makes the ~50×-slower currents visibly crawl.
-CMEMS land cells are null → land stays uncolored and particle-free for free.
-**Last refreshed: CMEMS daily mean 2026-07-11** (real credentialed fetch; an earlier
-CoastWatch ERDDAP stand-in used for pre-login verification has been replaced).
-Nullschool-parity rendering (2026-07-12, from the user's side-by-side screenshots): land is
-charcoal `#333338` — `topojson.merge`d country polygons filled on the `#lines` canvas *above*
-the overlay, so the vector coastline crops the grid staircase; `buildGrid`'s bilinear is
-NaN-tolerant (hole corners drop out, weights renormalize) so sea color reaches the last valid
-cell instead of retreating half a cell from every coast; the ocean overlay renders dimmer
-(alpha 0.58 vs 0.72) so the calm ocean stays near-black and the trails (multiplier 4, line
-width 1.7 device px, velocityScale 1/1700, intensity saturating at 0.7 m/s — user-matched
-against live nullschool) read as the currents. Trails cannot spill onto land: `#lines` sits
-above `#animation`, so the opaque land fill crops them at the vector coastline. Water
-without current data (Caspian, Aral, coastal grid holes) renders `NO_DATA_GRAY` — the same
-charcoal as land — rather than a black hole.
+`scripts/upload_data.sh` ships the files to R2 over the S3-compatible API with the AWS CLI
+(`--cache-control "public, max-age=1800, must-revalidate"`; Cloudflare's edge compresses JSON on
+the fly, so ~10 MB files travel as ~2.5 MB). It globs `current-*.json`, so a dataset added by a
+future layer is picked up automatically. Required environment (locally from the git-ignored
+`.env/r2`): `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `R2_BUCKET`
+(default `earth-data`).
 
-The **sea water temperature layer** (`feature/SeaWaterTemperature`, 2026-07-12) pairs the
-currents-driven particles with a thetao scalar overlay
-(`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m`, °C at 0.494 m, same ¼° grid) through the
-same bwr diverging colormap as the Atmosphere temperature layer, domain **0–35 °C** (user's
-spec, revised same day from 0–50; values outside pin to the end colors via the clamped LUT
-index — the white midpoint sits at 17.5 °C so tropical water reads warm-red).
-`refresh_ocean.py` is parameterized like `refresh_wind.py`: `currents` / `currents25`
-(u/v at 0.494 m / 25.211 m) and `temperature` (thetao) products, each with a `depth`
-bracket; its `coarsen()` samples every 3rd point (1/12° → ¼°, atmosphere-grid parity) and
-fills land-sampled points from the surrounding 7×7 full-res window so the data's coast hugs
-the vector one (kills the charcoal staircase in the sea; tightened twice on user review —
-the first pass at ⅓° + 5×5 still left single-cell nubs on convoluted coasts).
-**Depths**: both CMEMS datasets carry **50 depth levels**
-(0.494, 1.54, 2.65, 3.82, 5.08, 6.44, 7.93, 9.57, 11.4, 13.5, 15.8 … 55.8 … 109.7 … 453.9 …
-1062 … 5727.9 m); we render the shallowest (0.494 m). Deeper layers only need
-`minimum_depth`/`maximum_depth` changed in `fetch()` plus a LAYERS entry.
+### The twelve datasets
 
-The **wave layers** (`feature/OceanWaves`, 2026-07-12) come from **GFS-Wave** — the
-WAVEWATCH III model coupled into GFS (nullschool's credited source for its waves modes) —
-via the same anonymous NOMADS filter CGI as the atmosphere (`filter_gfswave.pl`, file
-`gfswave.t{hh}z.global.0p25.f000.grib2`, **no login needed**), through
-`scripts/refresh_waves.py` (same newest-cycle walk-back as `refresh_wind.py`). One download
-of HTSGW + PERPW + DIRPW yields two files: `current-ocean-waves-gfswave-0.25.json` holds u/v
-**propagation vectors whose magnitude is the peak period in seconds** (DIRPW is the
-meteorological "direction from" — verified against the Southern Ocean westerlies, median
-265° — so propagation = from + 180°); the period overlay is then just `fromMagnitude` and
-the click readout speaks seconds, no third file. `current-ocean-wave-height-gfswave-0.25.json`
-is the HTSGW scalar. Both fields get a 5×5 NaN-dilation pass at native 0.25° (the wave
-model's land mask is a cell fatter than the vector coastline — same staircase bug as CMEMS,
-same cure). Since the third redesign round (user spec) there is **one combined Waves layer**
-(`waves`, like nullschool): the background colors by significant wave height through a
-**blue → light blue → yellow → orange → saffron** ramp (0–15 m; >15 m clips to saffron via
-the clamped LUT index), and the click readout speaks both fields ("4.2 m · 12.3 s"). The
-particles are **crest dashes, not trails** (user spec against a zoomed nullschool shot):
-`animate()` grew per-layer `maxAge`/`fade` and a `crestLength` mode that strokes an oriented
-dash PERPENDICULAR to travel through the segment midpoint — dense flickering crest rows
-**barely creeping** (velocityScale 1/360000 — waves are localized and far slower than winds;
-history 1/12000 → ×0.10 → ×⅓) and dying fast (maxAge 12, fade 0.6, multiplier 3, width 2.5;
-crest half-length 4.5 px scaled by the intensity bucket). `brightnessFloor: 40` widens the
-particle brightness ramp (default floor 130), so faster long-period swell draws markedly
-brighter crests than slow chop — deep-water phase speed grows with period, so
-period-brightness *is* speed-brightness.
+All in grib2json format (the subset of header fields `wind.js` reads), all 0.25° global grids,
+~100 MB total raw. GFS/GFS-Wave grids are 1440×721 with a 0° origin; the CMEMS grids are
+1440×681 with a -180° origin (the store stops at 80°S).
 
-**CMEMS credentials**: `scripts/refresh_ocean.py` needs a Copernicus Marine account. The
-toolbox reads `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD` —
-locally these live in the git-ignored `.env/copernicusmarine` (run
-`set -a && source .env/copernicusmarine && set +a` before the script); in CI they become
-GitHub Actions repository secrets. Anonymous access does not work (the ARCO zarr store 403s
-every data chunk).
+| File | Contents | Source / script | Product arg |
+|---|---|---|---|
+| `current-wind-surface-level-gfs-0.25.json` | 10 m u/v wind (~9.4 MB) | GFS via `refresh_wind.py` | `surface` |
+| `current-wind-1000hpa-gfs-0.25.json` | u/v @ 1000 hPa (~9.4 MB) | 〃 | `1000hpa` |
+| `current-wind-500hpa-gfs-0.25.json` | u/v @ 500 hPa (~9.9 MB) | 〃 | `500hpa` |
+| `current-wind-10hpa-gfs-0.25.json` | u/v @ 10 hPa (~10.1 MB) | 〃 | `10hpa` |
+| `current-temp-surface-level-gfs-0.25.json` | 2 m temperature, K (~6.2 MB) | 〃 | `temperature` |
+| `current-rh-surface-level-gfs-0.25.json` | 2 m relative humidity, % (~5.2 MB) | 〃 | `rh` |
+| `current-dewpoint-surface-level-gfs-0.25.json` | 2 m dew point, K (~6.2 MB) | 〃 | `dew` |
+| `current-ocean-currents-cmems-0.25.json` | u/v currents @ 0.494 m (~11.7 MB) | CMEMS via `refresh_ocean.py` | `currents` |
+| `current-ocean-currents-25m-cmems-0.25.json` | u/v currents @ 25.211 m (~11.7 MB) | 〃 | `currents25` |
+| `current-ocean-temp-cmems-0.25.json` | thetao, °C @ 0.494 m (~6.1 MB) | 〃 | `temperature` |
+| `current-ocean-waves-gfswave-0.25.json` | wave propagation u/v; magnitude = peak period (s) (~10.9 MB) | GFS-Wave via `refresh_waves.py` | — |
+| `current-ocean-wave-height-gfswave-0.25.json` | significant wave height, m (~5.1 MB) | 〃 (same download) | — |
 
-To refresh (preferred path, verified working — no Java needed):
+Sources and how they are shaped:
 
-```sh
-python3 -m venv gribenv && ./gribenv/bin/pip install pygrib
-./gribenv/bin/python scripts/refresh_wind.py            # surface (10 m) wind
-./gribenv/bin/python scripts/refresh_wind.py 500hpa     # or: 1000hpa, 10hpa
-./gribenv/bin/python scripts/refresh_wind.py temperature  # or: rh, dew (2 m scalars)
+- **GFS** (NCEP / US National Weather Service) — UGRD/VGRD on the requested level, or a single
+  2 m scalar (TMP/RH/DPT), from the anonymous NOMADS grib filter CGI (`filter_gfs_0p25.pl`, file
+  `gfs.t{hh}z.pgrb2.0p25.f000`), decoded with pygrib. Wind values are rounded to 0.1.
+- **GFS-Wave** — the WAVEWATCH III model coupled into GFS, nullschool's credited source for its
+  waves modes, via the same anonymous NOMADS CGI (`filter_gfswave.pl`, file
+  `gfswave.t{hh}z.global.0p25.f000.grib2`, **no login needed**). One download of HTSGW + PERPW +
+  DIRPW yields both wave files: propagation u/v whose magnitude is the peak period in seconds
+  (DIRPW is the meteorological "direction from", so propagation = from + 180° — verified against
+  the Southern Ocean westerlies, median 265°), plus the HTSGW scalar. Because the magnitude is
+  the period, the period overlay and click readout come free from the `fromMagnitude` machinery
+  — no third file.
+- **CMEMS** (Copernicus Marine Service) — Global Ocean Physics Analysis & Forecast
+  (`GLOBAL_ANALYSISFORECAST_PHY_001_024`), datasets `cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m`
+  (uo/vo) and `cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m` (thetao), daily means read from the
+  ARCO zarr store through the `copernicusmarine` toolbox and strided ×3 from 1/12° to ¼°
+  (atmosphere-grid parity). Both datasets carry **50 depth levels** (0.494, 1.54, 2.65, 3.82,
+  5.08, 6.44, 7.93, 9.57, 11.4, 13.5, 15.8 … 25.2 … 55.8 … 109.7 … 453.9 … 1062 … 5727.9 m); the
+  shipped layers use 0.494 m and 25.211 m. A deeper layer needs only a new `PRODUCTS` entry with
+  a `depth` bracket plus a `LAYERS` entry. Land cells are `null`, which the engine renders as
+  charcoal, so land stays uncolored and particle-free for free. Store facts worth keeping: time
+  is hours since 1950-01-01; the store also holds ~8 forecast days, and the script deliberately
+  takes the newest day ≤ the requested one; uo/vo are float32 m/s with no scale/offset;
+  latitude runs -80…90 and is flipped north-first for scan mode 0.
+
+Both ocean sources ship a land mask a cell fatter than the vector coastline, which showed as a
+charcoal staircase jutting into the sea. Both refresh scripts cure it in the data — CMEMS by
+filling land-sampled points from the surrounding 7×7 full-resolution window during coarsening,
+GFS-Wave by a 5×5 NaN-dilation at native 0.25° — and the engine's NaN-tolerant bilinear finishes
+the job at render time.
+
+### Refreshing the data
+
+```bash
+# The shared venv holds pygrib, numpy, copernicusmarine and the AWS CLI.
+# If ~/.venvs/aws/bin is not in PATH, use the full paths below.
+
+~/.venvs/aws/bin/python scripts/refresh_wind.py               # surface (10 m) wind
+~/.venvs/aws/bin/python scripts/refresh_wind.py 500hpa        # or 1000hpa, 10hpa
+~/.venvs/aws/bin/python scripts/refresh_wind.py temperature   # or rh, dew (2 m scalars)
+~/.venvs/aws/bin/python scripts/refresh_waves.py              # both wave files from one download
+
+set -a && source .env/copernicusmarine && set +a
+
+~/.venvs/aws/bin/python scripts/refresh_ocean.py              # all three CMEMS products, today UTC
+~/.venvs/aws/bin/python scripts/refresh_ocean.py currents25   # one product
+~/.venvs/aws/bin/python scripts/refresh_ocean.py currents <YYYY-MM-DD>  # one product, given day
+
+set -a && source .env/r2 && set +a
+./scripts/upload_data.sh                                   # push public/data/current-*.json to R2
 ```
 
-The script finds the newest published GFS cycle on NOMADS (walking back 6 h at a time — cycles
-appear ~4–5 h after their nominal time), downloads only the 10 m UGRD/VGRD fields via the grib
-filter CGI (`filter_gfs_0p25.pl`, file `gfs.t{hh}z.pgrb2.0p25.f000`; NB the 0.5° product is
-named `pgrb2full.0p50`, the 0.25° one plain `pgrb2`), decodes with pygrib, and overwrites the
-JSON in place. Pass a local `.grib2` path as an argument to skip the download. Grid geometry
-(nx/ny/dx/dy) is derived from the GRIB, and `buildGrid()` reads it from the header, so any
-regular lat/lon resolution works end-to-end.
+`refresh_wind.py` and `refresh_waves.py` find the newest published cycle on NOMADS by walking
+back 6 h at a time from four hours ago (files appear ~3.5–5 h after the nominal cycle time),
+download only the needed fields, and overwrite the JSON in place; pass a local `.grib2` path to
+skip the download. `refresh_ocean.py` with no product argument refreshes all three CMEMS products
+and logs a per-product progress/summary report (dataset, dimensions, selected record and depth,
+ocean-vs-NaN cell counts, timings, output size).
 
-Gotchas learned the hard way:
+The data on screen is a static snapshot: it only advances when a refresh script runs, so
+"most recent by default" becomes true unattended once the GitHub Action in
+[Next steps](#next-steps) is live. The HUD's `Data:` line always shows the loaded snapshot's own
+timestamp, whatever its age.
 
-- The **`.anl` files do not expose 10 m winds** through the filter CGI (returns
-  "data file is not present"). Use **`f000`** of the newest cycle instead — it's the
-  analysis-hour forecast, effectively identical.
-- A cycle's directory can exist on NOMADS before its grid files do; the script's fallback
-  handles this (e.g. it skipped an empty 00z and used the previous day's 18z).
+### Credentials
 
-`public/data/earth-topo.json` is Natural Earth coastline/lake topology (50m + 110m), from
-cambecc/earth. `countries-{50m,110m}.json` are vendored from
-[world-atlas@2](https://github.com/topojson/world-atlas) (Natural Earth derived) for political
-borders.
+- **GFS / GFS-Wave**: anonymous, nothing to configure.
+- **CMEMS**: needs a Copernicus Marine account. The toolbox reads
+  `COPERNICUSMARINE_SERVICE_USERNAME` / `COPERNICUSMARINE_SERVICE_PASSWORD`; locally these live
+  in the git-ignored `.env/copernicusmarine` (`set -a && source .env/copernicusmarine && set +a`
+  before running), and in CI they become GitHub Actions repository secrets. Anonymous access does
+  **not** work: the ARCO zarr store serves `.zmetadata` and coordinate arrays publicly but
+  returns 403 for every data chunk (verified across chunk indices and both dimension separators).
+- **R2**: `.env/r2` holds `R2_ACCOUNT_ID` and the S3-compatible key pair; the token is scoped to
+  one bucket with Object Read & Write only.
+
+Never print or commit these; `.env/` is git-ignored.
+
+### Gotchas learned the hard way
+
+- The GFS **`.anl` files do not expose 10 m winds** through the filter CGI (it returns "data file
+  is not present"). Use **`f000`** of the newest cycle instead — the analysis-hour forecast,
+  effectively identical.
+- A cycle's directory can exist on NOMADS before its grid files do, so the walk-back must key on
+  the response actually being GRIB (the scripts check the magic bytes and a minimum size); it has
+  skipped an empty 00z and used the previous day's 18z.
+- The 0.5° GFS product is named `pgrb2full.0p50` while the 0.25° one is plain `pgrb2` — an easy
+  404 if the resolution ever changes.
+- CMEMS's shallowest depth coordinate is 0.494025 m, so asking for `[0, 1]` works but warns; the
+  script uses the interval `(0.494, 0.495)` instead.
+- Dead ends already explored for ocean currents: NOMADS has no RTOFS filter, RTOFS 2ds is
+  netCDF-only, NOMADS OPeNDAP is retired, OSCAR/jplOscar is stale. The working non-CMEMS fallback
+  is NOAA CoastWatch ERDDAP `noaacwBLENDEDNRTcurrentsDaily` (0.25° blended geostrophic,
+  `.ncoJson` + stride; needs curl — a python-urllib user agent gets 403).
 
 ## Fixed bugs
 
-- **Streaking lines across the globe** (fixed & verified 2026-07-10): thin straight chords
-  appeared over the disc, drawn by the particle animation. Root cause: the finite-difference
-  projection distortion **diverges at the globe's limb** (not just the poles) — headless
-  instrumentation showed screen-space vectors of 170–2400 px/frame originating exclusively at
-  rim pixels (~90° from the view center), which were stroked as straight lines when they landed
-  back on the disc. Fix: `evolve()` in `wind.js` respawns any particle whose per-frame move
-  exceeds the streak-guard threshold (see next entry for how that threshold is sized).
-- **Missing trails in high-wind areas when zoomed in** (fixed & verified 2026-07-10): the first
-  streak-guard threshold was a fixed screen distance (`max(10 px, 2% of globe height)`), but a
-  particle's legitimate per-frame move grows with zoom (∝ projection scale). At ~5×+ zoom a real
-  35–40 m/s eyewall wind moves 20–40 px/frame and was killed as a "streak", leaving a dead
-  annulus with no trails exactly over the red high-speed zone of the typhoon. Fix: the guard is
-  now sized from the data — `buildGrid()` records the dataset's max wind speed, and the
-  threshold is `max(10 px, 2 × maxSpeed × bounds.height × VELOCITY_SCALE × px-per-degree)`,
-  where px-per-degree = `projection.scale() × π/180`. Legit fast wind passes at any zoom; limb
-  artifacts (5–100× beyond it) are still caught. Reproduced and verified headlessly at 8× zoom
-  via the `#rotate=-128.5,-21.5&zoom=8` URL hash; default view re-verified streak-free.
-- **Stray red sentinel pixels on the antialiased rim** (fixed earlier): the cleanup pass at the
-  end of `interpolateField()` erases leftover magenta sentinel pixels. Verified clean in the
-  2026-07-10 screenshots.
-- **Frozen overlay misaligned during drag/zoom** (fixed 2026-07-10): the first freeze-frame
-  implementation left the stale overlay static while the map outline rotated/scaled beneath it,
-  so the color disc visibly detached from the globe (wrong size while zooming, wrong hemisphere
-  while dragging). Fix: live low-res overlay preview during manipulation (see pipeline step 6).
-  First attempt painted a colored square around the globe because `projection.invert` returns
-  finite coordinates for off-disc points (d3-geo's clamped asin) — masked by radius check.
-  Verified by headless screenshot of the preview pass: clean disc, aligned with coastlines,
-  visually near-identical to the full-res overlay.
-- **Stale data/engine after refresh** (fixed 2026-07-10): after refreshing the wind JSON and
-  fixing wind.js, a plain browser reload still showed the 2014 date and the streaks. Chrome's
-  normal reload only revalidates the HTML document — the `<script>` and `fetch()`ed JSON follow
-  heuristic caching and were served stale from disk cache. The data fetches use
-  `{cache: "no-cache"}` so they revalidate on every load (cheap 304 when unchanged). A `?v=`
-  cache-busting scheme on the script tag was used during heavy iteration and later removed for
-  simplicity (user preference) — after editing wind.js, view changes with a hard reload
-  (Ctrl+Shift+R).
+Each entry is root cause → fix, with how it was verified.
 
-## Aesthetic-parity pass
+- **Streaking lines across the globe.** Thin straight chords appeared over the disc, drawn by the
+  particle animation. The finite-difference projection distortion **diverges at the globe's limb**
+  (not just at the poles): headless instrumentation showed screen-space vectors of 170–2400
+  px/frame originating exclusively at rim pixels (~90° from the view center), stroked as straight
+  lines whenever they landed back on the disc. `evolve()` now respawns any particle whose
+  per-frame move exceeds the streak-guard threshold.
+- **Missing trails in high-wind areas when zoomed in.** The first streak guard used a fixed screen
+  distance (`max(10 px, 2% of globe height)`), but a legitimate per-frame move grows with zoom
+  (∝ projection scale): at ~5×+ zoom a real 35–40 m/s eyewall wind moves 20–40 px/frame and was
+  killed as a "streak", leaving a dead annulus with no trails exactly over the storm's red core.
+  The guard is now sized from the data — `buildGrid()` records the dataset's max speed and the
+  threshold is `max(10 px, 2 × maxSpeed × bounds.height × velocityScale × zoomFactor ×
+  pxPerDegree)`, where `pxPerDegree = projection.scale() × π/180`. Legitimate fast flow passes at
+  any zoom; limb artifacts (5–100× beyond it) are still caught. Reproduced and verified headlessly
+  at 8× zoom via `#rotate=-128.5,-21.5&zoom=8`; the default view was re-verified streak-free.
+- **Hollow typhoon eye at high zoom.** The Euler step could exceed a tight vortex's radius, so no
+  particle ever traced the eyewall. Capped by `MAX_PARTICLE_STEP` (12 px), which leaves speed free
+  to grow with zoom below the cap.
+- **Frozen overlay misaligned during drag/zoom.** The first implementation kept the stale overlay
+  static while the map outline rotated and scaled beneath it, so the color disc visibly detached
+  from the globe. Fixed by the live low-res overlay preview (pipeline step 6). The first attempt at
+  that painted a colored square around the globe, because `projection.invert` returns finite
+  (mirrored) coordinates for off-disc points thanks to d3-geo's clamped `asin` — masked by an
+  explicit radius check. Verified by headless screenshots of the preview pass: clean disc, aligned
+  with the coastlines, near-identical to the full-res overlay.
+- **Stray sentinel pixels on the antialiased rim.** The 2×2 write pattern misses some rim pixels,
+  leaving the magenta mask fill visible as stray dots. A cleanup pass at the end of
+  `interpolateField()` zeroes any remaining sentinel pixel's alpha.
+- **Charcoal staircase in the sea (ocean and wave layers).** Striding the 1/12° CMEMS grid marked
+  an output cell "land" whenever its exact sample point was, and GFS-Wave's own land mask is a cell
+  fatter than the vector coastline — both produced blocky charcoal blocks jutting into the water.
+  Fixed in the data (window fill during coarsening / NaN dilation) and at render time (NaN-tolerant
+  renormalizing bilinear, plus the vector land fill on `#lines` cropping whatever bleeds past).
+- **Particle trails spilling onto land.** Solved by canvas order: `#lines` sits above `#animation`,
+  so the ocean layers' opaque land fill crops trails at the vector coastline for free.
+- **Dataless water rendered as black holes** (Caspian, Aral, coastal grid holes). Painted
+  `NO_DATA_GRAY` — the same charcoal as land — in both the full field and the drag preview.
+- **Wrap-around column missing on a ⅓° grid.** The grid-continuity test used `floor(ni × Δλ)`,
+  and 1080 × ⅓ is 359.99… in floating point; `round` fixed it.
+- **Stale data/engine after a refresh.** A plain browser reload still showed the old snapshot and
+  old code: Chrome's normal reload only revalidates the HTML document, while `<script>` and
+  `fetch()`ed JSON follow heuristic caching and were served from disk cache. Data fetches now use
+  `{cache: "no-cache"}` (a cheap 304 when unchanged); for script edits, hard-reload
+  (Ctrl+Shift+R) — the `?v=` cache-busting scheme used during heavy iteration was removed for
+  simplicity.
 
-- **Done & verified** (headless Chromium screenshots): 0.5° data renders with red typhoon
-  eyewall + bright core, political borders, finer/dimmer particle trails, brighter overlay;
-  no streaks; no rim artifacts; no console errors; HUD reads "GFS 0.5°" and the current run's
-  date. Post-change metrics vs the nullschool reference screenshot: brightness 0.52 (target
-  0.53), red-tint pixels 360 (reference 179, previously 0).
-- **Human-verified**: drag freeze-frame behavior (user confirmed it matches nullschool).
-  Follow-up fix the same day: the overlay now re-projects live at low resolution during
-  drag/zoom so it tracks the globe outline instead of sitting frozen and misaligned; the
-  preview render itself is headless-verified, the drag feel needs one more human pass.
+## Version control / feature deployment structure
 
-- **Baseline measurement**: saturation already matched (0.71 theirs / 0.69 ours); 
-  theirs was brighter (0.53 vs 0.46) with 179 red eyewall pixels vs our 0, and finer/denser trails. 
-
-  All four gaps were closed:
-
-   - **Red tints at intense wind** — was a *data resolution* issue, not a color-scale issue: the
-   scale's red band lives at ~35–45 m/s and the 1° grid smoothed the typhoon eyewall to
-   38.9 m/s. **Done:** data upgraded to 0.5° (peak 40.5 m/s → red ring + bright core verified
-   in a zoomed crop).
-   - **Trail texture** — ours was sparser/chunkier (fat CSS-px strokes, ramp maxing white at
-   17 m/s). **Done:** `#animation` canvas is dpr-scaled with 1-device-px strokes, particle
-   count ×10 multiplier ×min(dpr, 2), ramp floor 85→64, fade 0.97→0.96. Second pass
-   (user-requested): trail ramp tinted green and `VELOCITY_SCALE` raised 1/60000→1/40000 for
-   nullschool-like motion speed; the streak guard scales with `VELOCITY_SCALE`, so both bug
-   fixes hold automatically. Third pass (user comparison at matched zoom): multiplier 10→6 and
-   fade 0.96→0.97 (fewer, longer, fluid streamlines instead of dense fur), ramp floor 64→100
-   (slow-wind trails bright and distinct, not dark-gray mush), tint deepened to r×0.78/b×0.82,
-   `OVERLAY_ALPHA` 0.5→0.55 (leaf-green field dominates over the trails).
-   - Overlay luminance** — **done:** `OVERLAY_ALPHA` 0.4→0.5 (measured brightness now 0.52 vs
-   target 0.53).
-   - **Political borders** — **done:** vendored world-atlas countries topologies;
-   `topojson.mesh(…, (a, b) => a !== b)` draws internal boundaries at 0.25 alpha.
-   - **Fourth pass** (user comparison): trail alpha 1.0→0.85 (overlay bleeds through trails —
-   red eyewall stays visible), data upgraded 0.5°→0.25° (nullschool's resolution; grid rows
-   refactored to Float32Arrays to keep memory sane), graticule alpha 0.07→0.12 (their visible
-   lat/lon mesh).
-   - **Fifth pass** ("cyclone too white", measured): in the eyewall ring 10.8% of our pixels
-   were white-ish vs nullschool's 0.0%. First fix used short dashes + zoom-normalized speed
-   (0.2% white), but the user preferred the long streamlines and physical zoom-scaled speed,
-   so the **sixth pass** restored fade 0.97 / age 100 / zoom-growing velocity (streak guard
-   re-scaled to match). Two further ramp experiments (ceiling 255→220, then speed-dependent
-   alpha 0.6→0.35; measured 3.9% and 2.1% white cover) were **reverted — the user preferred
-   the brighter long-streamline look** (flat 0.55 alpha, full 100→255 ramp, ~4.8% white in the
-   eyewall crop). Final aesthetic: luminous fluid streamlines; nullschool's 0% white comes from
-   short dashes, deliberately not adopted.
-
-## HUD / burger menu (2026-07-10)
-
-The bottom-left HUD is collapsed by default to a slim bar (`☰ earth` + transient
-status line; page/HUD title is plain "earth", per user request). The burger button expands `#menu-panel` upward, nullschool-style, containing:
-
-   - **Tabs** — hierarchical and exclusive: one top-level domain active at a time, and each
-     domain displays exactly **one** layer (unlike nullschool, layers are never combined).
-     Atmosphere holds seven layers: four wind layers (**Surface (10 m), 1000 hPa, 500 hPa,
-     10 hPa** — wind-speed sinebow overlay) and three combined layers (**Temperature,
-     Humidity, Dew Point** — surface-wind particle trails over a 2 m scalar field with
-     inferno / Purples / PuBuGn colormaps; scale bar and click readout switch with the
-     layer). Buttons carry `data-layer` ids matching the `LAYERS` registry in `wind.js`; clicking
-     dispatches a `layerchange` CustomEvent, and `loadLayer()` in the engine swaps the
-     dataset, restarts the pipeline, and syncs the active-button state (single source of
-     truth) — including revealing the tab that owns the layer when booting via the hash.
-     `#layer=<id>` in the URL hash selects the initial layer (also the headless-testing
-     hook, since the menu needs a click). Since 2026-07-12 the domains **stack vertically**
-     (`#tabs` is a column; each tab header sits directly above its own `.tab-body`): the
-     **Ocean tab** below Atmosphere holds **Current-Surface** (`data-layer="ocean"`),
-     **Current-25m** (`data-layer="ocean25"`), **Temperature** (`data-layer="sst"`) and
-     **Waves** (`data-layer="waves"`, the combined height + direction/period map), all live.
-   - Data source + snapshot date lines, the color-scale bar, the click-for-wind-speed
-     readout, and credits — all IDs (`#scale`, `#data-date`, `#location`, `#status`)
-     unchanged, so `wind.js` needed no edits; `#status` lives in the always-visible bar so
-     load progress/errors show while collapsed.
-
-Logic lives in `js/menu.js` (plain JS, ~30 lines). CSS gotcha encountered: `.tab-body` uses
-`display: flex`, which beats the HTML `hidden` attribute's UA-stylesheet `display: none` —
-hence the explicit `.tab-body[hidden] { display: none; }` rule. Headless verification: the
-burger can't be clicked headlessly; screenshot the open state by temporarily removing the
-`hidden` attribute from `#menu-panel` (and restore it).
+- **`main` is the only long-lived branch**, always deployable; Vercel's production deployment
+  points at it. Everything else is short-lived: branch off `main`, build, verify, merge with
+  `--no-ff`, delete. Vercel gives every branch a preview URL, which fits the screenshot-based
+  visual verification workflow — compare a branch's render against production side by side before
+  merging.
+- **One short-lived branch per render** (`feature/<Layer>`), and **shared-engine work goes in its
+  own `refactor/…` branch that merges first**. The engine is a single file, so two feature branches
+  editing it independently make the second merge painful; with the refactor landed first, each
+  feature branch touches mostly its own `LAYERS` entry and colormap.
+- **Data refreshes never touch git at all**: the weather JSONs are git-ignored, refresh scripts
+  update the local copies, and `upload_data.sh` ships them to R2. Feature branches and `main` carry
+  code only.
+- **Commits are squashed to one per work day**, messaged `YYYYMMDD: <summary>`. History has been
+  rewritten (`git filter-repo` to drop pre-split data blobs, and the squash), so a stale clone must
+  be re-cloned, not pulled.
+- **Avoid** a `develop` branch or gitflow (pure ceremony at this scale) and long-lived parallel
+  feature branches — the features share one engine, so divergence is the main risk and prompt
+  merges are the cure.
 
 ## Next steps
 
-   - **Ocean currents — DONE (2026-07-12, `feature/OceanCurrent`).** Real CMEMS data via
-     the user's credentials in `.env/copernicusmarine`; nullschool-parity pass (charcoal
-     land fill, NaN-tolerant bilinear, dim overlay + dense hairline trails) verified against
-     the user's side-by-side screenshots; atmosphere layers regression-checked.
-     **Data-access facts** (previous session's note was wrong): the CMEMS ARCO zarr is
-     *not* fully anonymous — `.zmetadata` and coordinate chunks GET fine, but every data
-     chunk (`uo/{t}.0.0.0` etc.) returns **403**, verified across chunk indices and both
-     dimension separators. Hence the credentialed toolbox. Store facts that remain true:
-     time = hours since 1950-01-01, daily means incl. ~8 forecast days (script picks newest
-     day ≤ today); depth idx 0 = 0.494 m; uo/vo float32 m/s, no scale/offset; land = NaN;
-     lat −80..90 (flip north-first for scan mode 0). Dead ends: NOMADS has no RTOFS filter,
-     RTOFS 2ds is netCDF-only, NOMADS OPeNDAP retired (SCN 25-81), OSCAR/jplOscar stale.
-     Working fallback: NOAA CoastWatch ERDDAP `noaacwBLENDEDNRTcurrentsDaily` (0.25° blended
-     geostrophic; `.ncoJson` + stride; needs curl — python-urllib UA gets 403).
-   - **Sea water temperature — DONE (2026-07-12, `feature/SeaWaterTemperature`)**: thetao
-     scalar over currents-driven particles, bwr 0–50 °C per user spec. Possible follow-up:
-     **depth-level layers** — both CMEMS datasets have 50 depths (0.494 m … 5727.9 m; e.g.
-     15.8 m, 109.7 m, 453.9 m are natural picks); `fetch()`'s minimum/maximum_depth plus a
-     LAYERS entry per depth is all it takes.
-   - NB the venv (pygrib/PIL/numpy/copernicusmarine) lives in the session scratchpad under
-     /tmp — likely wiped by reboot; recreate with `python3 -m venv gribenv && ./gribenv/bin/pip
-     install pygrib pillow numpy copernicusmarine`.
-   - Automate data refresh: a GitHub Action running `scripts/refresh_wind.py` +
-     `refresh_waves.py` (anonymous) and `refresh_ocean.py` (CMEMS secrets), then
-     `scripts/upload_data.sh` straight to the R2 bucket — **no commits, no Vercel
-     redeploys** (data/code split, 2026-07-12). Cadence: **once daily by default**
-     (user spec, 2026-07-12 — matches CMEMS's actual update rate); the repo variable
-     `REFRESH_CADENCE=6h` switches all datasets to the old 6-hourly cadence without a
-     workflow edit (a gate job filters the 6-hourly cron firings). Remaining one-time
-     setup on the user's side: create the R2 bucket + public URL, set `R2_DATA_ROOT`
-     in `wind.js`, add the five Actions secrets (+ the optional cadence variable).
-     The full step-by-step guide (R2 bucket, CORS, secrets, ready-to-paste workflow
-     YAML) lives at `~/Documents/earth-vercel-deploy.md` (deliberately outside the
-     repo, 2026-07-12).
-   - Touch pinch-zoom (only wheel zoom is implemented). A read-only URL-hash initial view
-     already exists (`#rotate=λ,φ&zoom=k`, e.g. `#rotate=-128.5,-21.5&zoom=5` centers the
-     typhoon; also the headless-testing hook) — writing the hash back on interaction like the
-     original remains open.
-
-## Version control / Feature deployment structure
-
-Agreed branching model for growing the project beyond surface wind. **Executed 2026-07-10**
-for the pressure-level wind layers: `refactor/layer-engine` merged first (`LAYERS` registry +
-`loadLayer()` + per-level refresh script), then `feature/wind-1000hpa`, `feature/wind-500hpa`
-and `feature/wind-10hpa` — each branched off updated `main` sequentially, verified headlessly
-via the `#layer=<id>` hash before merging with `--no-ff`.
-
-- **`main` is the only long-lived branch**, always deployable. Vercel's production deployment
-  points at it. Everything else is short-lived: branch off `main`, build, merge, delete.
-- **One short-lived feature branch per render**: `feature/ocean-currents`,
-  `feature/ocean-temperature`. Vercel gives every branch a preview URL automatically, which
-  fits the screenshot-based visual verification workflow — compare a branch's render against
-  production side by side before merging.
-- **Do the shared-engine refactor first, on its own branch (`refactor/layer-engine`), and
-  merge it before starting either ocean layer.** `wind.js` currently hardcodes the wind
-  layer; the engine must split into a shared core (projection, canvas stack, drag/zoom,
-  overlay preview, menu wiring) plus per-layer modules (data source, color scale, particle
-  vs. scalar rendering — ocean temperature is likely a pure overlay with no particles,
-  unlike currents). If both ocean branches instead modify the monolithic `wind.js`
-  independently, the second merge will be painful; after the refactor each feature branch
-  touches only its own layer module.
-- **Data refreshes never touch git at all** (since the 2026-07-12 data/code split — this
-  resolved the old "keep data refreshes out of feature branches" rule and the repo-size
-  worry in one move): the weather JSONs are git-ignored, refresh scripts update the local
-  copies, and `upload_data.sh` ships them to the R2 bucket. Feature branches and `main`
-  carry code only. NB: history from before the split still contains old data blobs; a
-  one-time `git filter-repo` pass could shrink the clone if that ever matters.
-- **Avoid** a `develop` branch or gitflow (pure ceremony at this scale) and long-lived
-  parallel feature branches — the features share the engine, so divergence is the main risk
-  and prompt merges are the cure.
+- **Automate the data refresh.** A GitHub Action running `refresh_wind.py` + `refresh_waves.py`
+  (anonymous) and `refresh_ocean.py` (CMEMS secrets), then `upload_data.sh` straight to R2 — no
+  commits, no Vercel redeploys. Cadence is **once daily by default** (matching CMEMS's own update
+  rate); the repo variable `REFRESH_CADENCE=6h` switches every dataset to a 6-hourly cadence
+  without a workflow edit, via a gate job that filters the 6-hourly cron firings. R2 is fully set
+  up (bucket, public URL, CORS, token, all 12 objects uploaded, `R2_DATA_ROOT` wired into
+  `wind.js`). Remaining, one-time and user-side: import the Vercel project, add the five Actions
+  secrets (plus the optional cadence variable), and commit the workflow YAML. Ready-to-paste YAML
+  and the step-by-step recipe are in the local `earth-vercel-deploy.md`.
+- **Depth-level ocean layers.** Both CMEMS datasets carry 50 levels; 15.8 m, 109.7 m and 453.9 m
+  are natural picks. One `PRODUCTS` entry (depth bracket) + one `LAYERS` entry + one menu button
+  each.
+- **Touch pinch-zoom** — only wheel zoom is implemented. The URL hash is read-only for the initial
+  view; writing it back on interaction, like the original, is still open.
+- **Small cleanups.** `LAYERS[].label` is documentation only — the HUD never reads it (the credit
+  line comes from `credit`/`DEFAULT_CREDIT`), so either wire it in or drop it. `.soon` and
+  `.layer:disabled` in `styles.css` are leftovers from the "Temperature soon" placeholder and no
+  longer match any markup.
+- **Local venv is disposable.** It has lived in a `/tmp` scratchpad and is wiped by a reboot;
+  recreate with `~/.venvs/aws/bin/pip install --upgrade pygrib numpy copernicusmarine awscli`.
 
 ## Changes
 
-2026-07-12, on `main` (refresh cadence + quality pass + history cleanup):
+### 2026-08-16
 
-- **Daily refresh by default** (was 6-hourly, applies to all datasets): the workflow in
-  `~/Documents/earth-vercel-deploy.md` keeps a 6-hourly cron but a gate job only lets the
-  ~00:45 UTC firing through unless the GitHub repo **variable** `REFRESH_CADENCE=6h` is
-  set — toggling cadence is a settings-page change, no workflow edit.
-- **Quality pass over `wind.js`**: `OCEAN_ALPHA` constant replaces the repeated
-  `Math.floor(0.58 * 255)` in the ocean scalar specs; the wave-particle comment block
-  rewritten to describe the final behavior instead of accreted was/now changelog (which
-  lives here in Changes). Dead-code audit found none: every function and top-level
-  constant in `wind.js`/`menu.js` and every script import is referenced.
-- **History rewritten with `git filter-repo`** to drop the pre-split data blobs from
-  all commits: `.git` went 49 MB → 1.9 MB; one pure data-refresh commit became empty and
-  was pruned (47 → 46 commits). Force-pushed. Old clones must be re-cloned; all commit
-  hashes changed.
+- **`refresh_ocean.py` reworked**: with no product argument it now refreshes **all three** CMEMS
+  products in one run (`currents`, `currents25`, `temperature`) instead of just `currents`, and
+  argument parsing accepts `[product] [YYYY-MM-DD]` in any of the four combinations.
+- **Progress reporting** added throughout: a TTY spinner with elapsed seconds (plain lines when
+  redirected, for CI logs), dataset dimensions, selected record/depth, ocean-vs-NaN cell counts,
+  per-stage timings, output size and a final per-product summary table. A missing day now raises
+  `RuntimeError` inside the product loop instead of exiting the process, so the failure is
+  reported with its product name.
+- **Surface depth bracket** changed from `[0, 1]` to `SURFACE_DEPTH = (0.494, 0.495)`: 0 m is
+  outside the store's coordinate range and produced a warning on every fetch.
+- **Repo hygiene**: `.gitignore` now covers `.vscode/` and `earth-vercel-deploy.md`; the
+  deployment runbook lives in the repo root as a local, untracked file (it holds the live bucket
+  URL and ops notes) instead of `~/Documents/`.
+- **History squashed** to one commit per work day (`YYYYMMDD: <summary>`).
 
-2026-07-12, on `main` (data/code split — Cloudflare R2):
+### 2026-08-15
 
-- **Weather data out of git**: the 12 `current-*.json` files are git-ignored and untracked
-  (still written to `public/data/` by the refresh scripts for local dev). Production fetches
-  them from a Cloudflare R2 bucket: `wind.js` routes every weather URL through `DATA_ROOT`
-  (`#data=` hash override → local on localhost → `R2_DATA_ROOT` constant, **placeholder until
-  the bucket exists**). Topologies stay in the repo. New `scripts/upload_data.sh` (S3 API,
-  AWS CLI, cache-control 1800 s). Refreshes now cause zero commits/force-pushes/redeploys.
-- Verified headlessly on both paths: localhost → local files; `#data=http://127.0.0.1:8421/`
-  → a CORS-enabled stand-in bucket on a second origin (temperature layer, flow + scalar).
-- Deployment guide `~/Documents/earth-vercel-deploy.md` rewritten around R2 (bucket setup,
-  public URL + CORS, five Actions secrets, upload workflow).
+- **Cloudflare R2 live**: bucket `earth-data` created, r2.dev public URL enabled, CORS policy set,
+  an Object Read & Write API token created and written to the git-ignored `.env/r2`, AWS CLI
+  installed locally. All 12 datasets uploaded, and the **overwrite path verified** — a full local
+  refresh followed by re-upload advanced `Last-Modified` and the served `refTime`.
+- **`R2_DATA_ROOT` set** in `wind.js` to the live r2.dev base URL (was a placeholder), so a
+  non-localhost page now fetches all 12 weather files from the bucket.
+- **All datasets refreshed** to one cycle: GFS and GFS-Wave 06:00 UTC, CMEMS daily mean of the
+  same day.
 
-2026-07-12, on `main` (wave-dash lifecycle):
+### 2026-07-12
 
-- **Softer crest lifecycle** — maxAge 12 → 20, fade 0.6 → 0.72: dashes were blinking in
-  and out too fast (user feedback); they now ease in/out over a longer life, still without
-  smearing thanks to the near-static march speed.
-- **Vercel deployment guide** written to `~/Documents/earth-vercel-deploy.md` (kept outside
-  the repo on purpose): Vercel project `earth` serving `public/`, GitHub Actions 6-hourly
-  refresh workflow, CMEMS secrets as Actions repository secrets, repo-size strategy.
+Ocean layers, the data/code split, and the tuning rounds that followed.
 
-2026-07-12, on `main` (wave-layer redesign, third round — combined map):
+- **Ocean currents layer** — CMEMS surface currents drive both the particles and a
+  `fromMagnitude` speed overlay (segmented nullschool ocean palette, 0–1.5 m/s), with per-layer
+  particle tuning, credit/date lines and an m/s click readout. `segmentedLut()` was added beside
+  the colormap LUTs, and the grid-continuity check switched from `floor` to `round`.
+- **New `scripts/refresh_ocean.py`** — a `copernicusmarine`-toolbox reader (1/12° → stride → ¼°,
+  grib2json out, land = null), credentials from the git-ignored `.env/copernicusmarine`. The
+  earlier claim that the CMEMS ARCO store is anonymous was disproved: metadata and coordinates
+  GET fine, every data chunk 403s.
+- **Vertical domain tabs** — `#tabs` became a column with each tab header above its own layer row;
+  `loadLayer()` also reveals the owning tab when booting from `#layer=`.
+- **Nullschool-parity pass on the ocean look** (side-by-side screenshots): charcoal `#333338` land
+  fill above the overlay so crisp vector coasts replace the blocky grid staircase; NaN-tolerant
+  renormalizing bilinear so sea color reaches the coast; ocean overlay dimmed to 0.58 alpha with
+  denser, finer trails.
+- **Ocean follow-up fixes**: trails no longer spill onto land (`#lines` moved above `#animation`);
+  dataless water paints `NO_DATA_GRAY` instead of black in both the field and the drag preview;
+  trails retuned faster, sparser and slightly thicker (velocityScale 1/2500 → 1/1700,
+  multiplier 7 → 4, width 1.2 → 1.7).
+- **Sea water temperature layer** — CMEMS thetao as a scalar overlay under the currents-driven
+  particles, through the same `bwr` diverging scheme as the atmosphere temperature layer. Domain
+  revised 0–50 → **0–35 °C** (the ocean never gets hotter, so the red half was wasted; the white
+  midpoint now sits at 17.5 °C and tropical water reads warm-red).
+- **Ocean-layer generalizations** — dataless-water charcoal and the m/s readout key on per-layer
+  `landFill` / `flowFormat` instead of the currents-only `fromMagnitude` flag; shared `OCEAN_*`
+  constants for file, credit and particle tuning.
+- **Deep-current layer** — added at 109.73 m, then moved to **25.211 m** (near the mixed-layer
+  base, where the flow starts diverging from wind-driven surface drift): layer id `ocean25`, menu
+  button **Current-25m**, product `currents25`. `refresh_ocean.py` products gained a `depth`
+  bracket and the header's `surface1Value` reports the real level.
+- **Coastal blockiness fixed in the data** (user bug report): a plain stride marked an output cell
+  "land" whenever its exact sample point was, giving the sea a land mask a whole cell fatter than
+  the vector coastline. `coarsen()` now fills land-sampled points from the surrounding
+  full-resolution window; tightened twice on review, ending at **¼° (stride 3) + 7×7** after ⅓° +
+  5×5 still left single-cell nubs on convoluted coasts. All ocean files were regenerated and
+  renamed `…-cmems-0.25.json`.
+- **Atmosphere temperature domain** -50–50 → **-10–45 °C**: the populated range gets the full
+  `bwr` stretch, endpoints pin, white point moves from 0 °C to 17.5 °C. Colormap history that day,
+  all user-directed: temperature inferno → reversed inferno → YlOrRd → `bwr`; RH Purples → BuPu
+  for contrast.
+- **Wave layers** — GFS-Wave (WAVEWATCH III) significant height + peak period/direction via the
+  anonymous NOMADS filter, no login required. New `scripts/refresh_waves.py`; one flow file
+  carries propagation u/v with |v| = period in seconds, so the period overlay is `fromMagnitude`
+  and the readout speaks seconds. A 5×5 coastal NaN dilation pre-empted the staircase bug the
+  CMEMS layers hit.
+- **Wave particle style, three rounds.** First: short, sparse, thick dashes marching in the
+  propagation direction instead of long streamlines. Then (user feedback) **crest dashes** — an
+  oriented dash *perpendicular* to travel via a new `crestLength` mode in `animate()`, marching at
+  a tenth of the speed and dying fast. Then a **softer lifecycle** (maxAge 12 → 20, fade
+  0.6 → 0.72) because the dashes blinked in and out too fast, and an **even slower march**
+  (velocityScale 1/120000 → 1/360000).
+- **One combined Waves layer** (user spec, like nullschool): the separate period layer was
+  removed; `waves` pairs the height colormap with the direction/period crest dashes and the click
+  readout speaks both fields ("4.2 m · 12.3 s"). Height colormap went navy→sand→orange, then
+  white→gray→teal, then the final **blue → light blue → yellow → orange → saffron** ramp (0–15 m,
+  higher clipping to saffron). `windIntensityColorScale` gained a per-layer `brightnessFloor` (40
+  for waves vs the default 130) so longer-period swell draws markedly brighter crests.
+- **Data/code split — Cloudflare R2.** The 12 `current-*.json` files became git-ignored and
+  untracked (still written to `public/data/` for local dev); `wind.js` routes every weather URL
+  through `DATA_ROOT` (`#data=` override → local on localhost → `R2_DATA_ROOT`); new
+  `scripts/upload_data.sh` (S3 API via AWS CLI, cache-control 1800 s). Refreshes now cause zero
+  commits, force-pushes or redeploys. Verified headlessly on both paths, the remote one against a
+  CORS-enabled stand-in bucket on a second origin.
+- **Refresh cadence: daily by default** (was 6-hourly, all datasets): the workflow keeps a
+  6-hourly cron, but a gate job only lets the ~00:45 UTC firing through unless the repo variable
+  `REFRESH_CADENCE=6h` is set — a settings-page toggle, no workflow edit.
+- **Quality pass over `wind.js`**: an `OCEAN_ALPHA` constant replaced the repeated
+  `Math.floor(0.58 * 255)`; the wave-particle comment block was rewritten to describe final
+  behavior rather than accreted history. A dead-code audit found nothing unreferenced.
+- **History rewritten with `git filter-repo`** to drop pre-split data blobs from all commits:
+  `.git` 49 MB → 1.9 MB, one pure data-refresh commit pruned as empty. Force-pushed; all hashes
+  changed.
+- **Deployment runbook written** (outside the repo on purpose) and then rewritten around R2:
+  bucket setup, public URL + CORS, five Actions secrets, upload workflow, repo-size strategy.
 
-- **One Waves layer** — `wavep` removed; the single `waves` map combines the height colormap
-  with the direction/period crest dashes (nullschool-style), readout "m · s" on click.
-- **Height colormap → blue → light blue → yellow → orange → saffron** (user spec), 0–15 m,
-  higher values clipped to saffron; replaces white→gray→teal.
-- **Speed-scaled brightness** — `windIntensityColorScale` gained a per-layer brightness
-  floor (`brightnessFloor: 40` for waves vs default 130): faster (longer-period) waves draw
-  markedly brighter crests.
-- **Even slower march** — velocityScale 1/120000 → 1/360000; the crests barely move, as
-  waves should against winds.
+### 2026-07-10
 
-2026-07-12, on `main` (wave-layer redesign, user feedback on the first render):
+The project went from the stock cambecc/earth port to its current shape in one extended session.
 
-- **Crest dashes** — wave particles now stroke an oriented dash **perpendicular to travel**
-  (`crestLength` mode in `animate()`), march at **1/10th** the previous speed
-  (velocityScale 1/120000) and die quickly (maxAge 12, fade 0.6): a flickering crest field
-  like the user's zoomed nullschool screenshot, nothing like the wind traces.
-- **Wave-height colormap → white → gray → teal** (user spec): silvery calm seas, deep-teal
-  storm core; the navy→sand→orange first cut is gone.
-
-2026-07-12, on `feature/OceanWaves`:
-
-- **Wave layers** (`waves` / `wavep`) — GFS-Wave (WAVEWATCH III / NCEP / NWS, nullschool's
-  source) significant wave height + peak wave period, via the anonymous NOMADS filter —
-  **no login required** (checked before building; the user asked for no workarounds if one
-  was). New `scripts/refresh_waves.py`; one flow file carries propagation u/v with
-  |v| = period (s), so the period overlay is `fromMagnitude` and the readout speaks seconds.
-- **Crest-dash particle style** — per-layer `maxAge` and `fade` in `particleOpts`: the wave
-  layers draw short, sparse, thick dashes marching in the propagation direction (nullschool's
-  waves look) instead of long streamlines; tuned against the user's reference screenshot
-  (multiplier 2.2→1.5, maxAge 18→14, fade 0.80→0.75, width 2.6→2.9 after first render).
-- **Coastal NaN-dilation** (5×5) in the wave converter — the wave model's land mask is a
-  cell fatter than the vector coastline; pre-empts the charcoal-staircase bug the CMEMS
-  layers hit. Atmosphere surface-wind layer regression-checked after the `animate()` change.
-
-2026-07-12, on `main` (post-merge tuning, second round):
-
-- **Deep-current level 110 m → 25 m** (user pick): layer id `ocean110`→`ocean25`, button
-  **Current-25m**, data at the 25.211 m level (near the mixed-layer base) — product
-  `currents25`, file `current-ocean-currents-25m-cmems-0.25.json`.
-- **Atmosphere temperature domain -50–50 → -10–45 °C** (user spec): populated range gets
-  the full bwr stretch, endpoints pin (same clamping as the ocean scale); the white point
-  moves from 0 °C to 17.5 °C.
-
-2026-07-12, on `main` (post-merge tuning):
-
-- **Residual blockiness tuned away** (third user pass): ocean grids re-coarsened at
-  **¼°** (stride 3 — atmosphere-grid parity) with a **7×7** NaN-fill window (±one output
-  cell), replacing ⅓° + 5×5 whose single-cell charcoal nubs still showed on convoluted
-  coasts. Data files renamed `…-cmems-0.25.json` (currents ~11 MB, thetao ~6 MB).
-
-2026-07-12, on `feature/DeepCurrent`:
-
-- **Current @ 110 m layer** (`ocean110`) — uo/vo at the 109.73 m level (below the mixed
-  layer: the Equatorial Undercurrent and boundary-current cores, invisible at the
-  surface). Menu buttons renamed **Current-Surface** / **Current-110m**; the two current
-  layers share one `CURRENT_SPEED_SCALAR` spec; `refresh_ocean.py` products carry a
-  `depth` bracket and the header's `surface1Value` reports the real level.
-- **Coastal blockiness fixed in the data** (user bug report, ScreenshotSST): striding the
-  1/12° grid marked a ⅓° cell "land" whenever its exact sample point was — a land mask a
-  whole cell fatter than the vector coastline (charcoal staircase in the sea). `coarsen()`
-  now fills land-sampled points with the mean of the surrounding 5×5 full-res window, so
-  the data's sea reaches within one 1/12° cell of the real coast. All three ocean datasets
-  regenerated.
-- **SST domain 0–50 → 0–35 °C** (user spec): the ocean never gets hotter, so the red half
-  of bwr was wasted; the white midpoint now sits at 17.5 °C and tropical water reads
-  warm-red.
-
-2026-07-12, on `feature/SeaWaterTemperature`:
-
-- **Sea water temperature layer** (`sst`) — CMEMS thetao (°C, 0.494 m) as a scalar overlay
-  under the currents-driven particles; bwr diverging 0–50 °C (same scheme as Atmosphere
-  temperature; out-of-range pins to end colors). `refresh_ocean.py` parameterized into
-  PRODUCTS (`currents` / `temperature`), Ocean tab's Temperature button live.
-- **Ocean-layer generalizations** — dataless-water charcoal and the m/s click readout now
-  key on the layer (`landFill` / `flowFormat`) instead of the currents-only
-  `fromMagnitude` flag; shared OCEAN_* constants for file/credit/particles.
-- **Depths explored**: both CMEMS datasets carry 50 levels, 0.494–5727.9 m (we use the
-  shallowest); deeper layers need one `fetch()` parameter + a LAYERS entry.
-
-2026-07-12, on `feature/OceanCurrent`:
-
-- **Ocean currents layer** — new `ocean` entry in `LAYERS`: CMEMS surface currents drive
-  both particles and a `fromMagnitude` speed overlay (segmented nullschool ocean palette,
-  0–1.5 m/s); per-layer `particles` tuning (velocityScale/maxIntensity) and per-layer
-  credit/date lines; click readout shows m/s. `segmentedLut()` added beside the colormap
-  LUTs; grid continuity check `floor`→`round` (1080 × ⅓° is 359.99… in floats).
-- **Vertical domain tabs** — `#tabs` is now a column with each tab header above its own
-  layer row; Ocean sits below Atmosphere with live **Current** and a "Temperature soon"
-  placeholder; `loadLayer()` also reveals the owning tab when booting from `#layer=…`.
-- **`scripts/refresh_ocean.py`** — copernicusmarine-toolbox reader (1/12° → stride ×4 → ⅓°,
-  grib2json output, land = null); credentials from the git-ignored `.env/copernicusmarine`.
-  First real dataset (2026-07-11 daily mean) committed.
-- **Nullschool-parity pass** (user screenshot comparison): charcoal `#333338` land fill
-  above the overlay (crisp vector coasts instead of black land + blocky grid staircase),
-  NaN-tolerant renormalizing bilinear in `buildGrid` (sea color reaches the coast), ocean
-  overlay dimmed to alpha 0.58 with denser/finer trails (multiplier 7, width 1.2,
-  saturation 0.7 m/s) so currents read as luminous streamlines over near-black ocean.
-- **Ocean follow-up fixes** (user bug reports, same day): trail spill-over onto land ended
-  by moving `#lines` above `#animation` in the canvas stack — the opaque land fill now crops
-  trails at the vector coastline (the "boolean op" costs nothing); dataless water (Caspian,
-  Aral, coastal grid holes) painted `NO_DATA_GRAY` = the land charcoal instead of black, in
-  both the field and the drag preview; trails retuned to the confirmed nullschool character —
-  faster, sparser, slightly thicker (velocityScale 1/2500→1/1700, multiplier 7→4, width
-  1.2→1.7).
-
-All of the below landed on 2026-07-10 (the project went from the stock cambecc/earth port to
-its current state in one extended session):
-
-- **Live data** — replaced the 2014-01-31 1° sample with current GFS analyses; resolution
-  upgraded 1° → 0.5° → 0.25° (nullschool parity). New pygrib-based `scripts/refresh_wind.py`
-  (no Java), later parameterized by level.
-- **Bug fixes** (details under [Fixed bugs](#fixed-bugs)): limb-divergence streak chords;
-  streak guard killing legitimate fast trails at zoom (data-driven threshold); hollow typhoon
-  eye from Euler overshoot (`MAX_PARTICLE_STEP` 12 px); frozen overlay misaligned during
-  drag/zoom (live low-res preview); stale browser cache (`no-cache` data fetches); rim
-  sentinel pixels.
-- **Aesthetic parity with nullschool** (measured passes, see
-  [Aesthetic-parity pass](#aesthetic-parity-pass)): pastelized extended-sinebow overlay at
-  0.72 alpha, near-neutral luminous long-streamline trails, deep-indigo calm end (≈#070570),
-  political borders, dpr-crisp rendering.
-- **Four-canvas stack** — dedicated `#lines` canvas above the overlay so coastlines render
+- **Live data** — the 2014-01-31 1° sample was replaced with current GFS analyses, and the
+  resolution upgraded 1° → 0.5° → 0.25° (nullschool parity; grid rows became `Float32Array`s to
+  keep memory sane). New pygrib-based `scripts/refresh_wind.py`, no Java, later parameterized by
+  level and product.
+- **Bug fixes** (details under [Fixed bugs](#fixed-bugs)): limb-divergence streak chords; the
+  streak guard killing legitimate fast trails at zoom (data-driven threshold); the hollow typhoon
+  eye from Euler overshoot; the frozen, misaligned overlay during drag/zoom (live low-res
+  preview); stale browser cache; rim sentinel pixels.
+- **Aesthetic parity with nullschool**, measured in several passes: pastelized extended-sinebow
+  overlay at 0.72 alpha (from 0.4), deep-indigo calm end, dpr-crisp rendering with 1-device-px
+  strokes, political borders, and the trail character retuned repeatedly — particle multiplier
+  10 → 6 → 3.5, fade 0.96 → 0.97, brightness floor 85 → 64 → 100 → 130, `VELOCITY_SCALE`
+  1/60000 → 1/40000 → 1/42000, alpha 1.0 → 0.85 → speed-dependent 0.70–0.50, graticule alpha
+  0.07 → 0.12. Two de-whitening experiments were measured and reverted by user preference; see
+  [Tuning notes](#tuning-notes).
+- **Four-canvas stack** — a dedicated `#lines` canvas above the overlay so coastlines render
   full-white and stay visible through the trails.
-- **Burger-menu HUD** — collapsed `☰ earth` bar; expandable panel with hierarchical
-  exclusive tabs (Atmosphere now; Ocean written but hidden until its pages are ready); the
-  color bar, data lines and readouts all moved inside. Page title simplified to "earth".
-- **Layer engine + pressure-level winds** — `LAYERS` registry, `loadLayer()`, `layerchange`
-  event, `#layer=<id>` hash; three new GFS layers (1000 hPa, 500 hPa, 10 hPa @ 06z) delivered
-  via `--no-ff` feature branches (`feature/wind-1000hpa`, `feature/wind-500hpa`,
-  `feature/wind-10hpa`) per the branching model above, each verified headlessly pre-merge.
-- **Scalar-overlay engine + combined layers** — `refactor/scalar-overlay` added
-  `buildScalarGrid()`, d3-scale-chromatic colormap LUTs, `overlayColorAt()` dispatch (full-res
-  field + drag preview), per-layer scale bar/label and click readout, and scalar products in
-  the refresh script (2 m TMP/RH/DPT). Then `feature/Temperature` (inferno),
-  `feature/RH` (Purples) and `feature/Dew` (PuBuGn) each paired surface-wind trails with
-  their scalar overlay — same branch-verify-merge flow; surface wind data refreshed to 06z on
-  `main` first so all layers share one GFS cycle.
-- **Repo hygiene** — `__pycache__` ignored; `?v=` cache-busting removed for simplicity;
-  README maintained as the cross-session handoff document; history pushed to GitHub.
-  All work branches (4× wind, 3× scalar, 2× refactor) were deleted after merging — their
-  history survives in the `--no-ff` merge commits; only `main` remains.
+- **Burger-menu HUD** — collapsed `☰ earth` bar plus an expandable panel with hierarchical
+  exclusive tabs; color bar, data lines and readouts all moved inside. Page title simplified to
+  "earth".
+- **Layer engine + pressure-level winds** — `LAYERS` registry, `loadLayer()`, the `layerchange`
+  event and the `#layer=<id>` hash, then the 1000 hPa, 500 hPa and 10 hPa wind layers, each on its
+  own short-lived branch verified headlessly before merging.
+- **Scalar-overlay engine + combined layers** — `buildScalarGrid()`, colormap LUTs,
+  `overlayColorAt()` dispatch (full-res field and drag preview alike), per-layer scale bar and
+  click readout, and the 2 m TMP/RH/DPT products in the refresh script; then the Temperature,
+  Humidity and Dew Point layers, with surface wind refreshed first so every layer shared one GFS
+  cycle.
+- **Repo hygiene** — `__pycache__` ignored, `?v=` cache-busting removed, this README established
+  as the cross-session handoff document, all work branches deleted after merging (their history
+  survives in the `--no-ff` merge commits).
