@@ -53,10 +53,10 @@ reload.
 
 Deployment: live at **[globe-climatesim.vercel.app](https://globe-climatesim.vercel.app)**. Vercel
 serves `public/` (`vercel.json` sets `outputDirectory` and cache headers), the weather JSONs come
-from a Cloudflare R2 bucket, and `.github/workflows/refresh-data.yml` refreshes them daily without
-touching git ([Automated refresh](#automated-refresh)). The full runbook — bucket, CORS, secrets,
-cadence toggle, maintenance playbook — lives in `earth-vercel-deploy.md` at the repo root, which is
-**git-ignored on purpose** (it holds ops notes and credentials handling).
+from a Cloudflare R2 bucket, and `.github/workflows/refresh-data.yml` refreshes them every six
+hours without touching git ([Automated refresh](#automated-refresh)). The full runbook — bucket,
+CORS, secrets, cadence toggle, maintenance playbook — lives in `earth-vercel-deploy.md` at the repo
+root, which is **git-ignored on purpose** (it holds ops notes and credentials handling).
 
 ## Project structure
 
@@ -69,7 +69,7 @@ cadence toggle, maintenance playbook — lives in `earth-vercel-deploy.md` at th
 ├── asset/view.png               # the screenshot above
 ├── .env/                        # git-ignored credentials: copernicusmarine, r2
 ├── .github/workflows/
-│   └── refresh-data.yml         # daily refresh of all 12 datasets → R2 (no commits, no deploys)
+│   └── refresh-data.yml         # 6-hourly refresh of all 12 datasets → R2 (no commits, no deploys)
 ├── scripts/
 │   ├── refresh_wind.py          # GFS winds + 2 m scalars via NOMADS, pygrib (anonymous)
 │   ├── refresh_ocean.py         # CMEMS currents + thetao via copernicusmarine (credentialed)
@@ -407,19 +407,53 @@ new data reaches production without a commit, a force-push or a Vercel deploy. I
 access to the repo (`permissions: contents: read`), and `concurrency` keeps a slow run from racing
 the next firing into a half-finished upload.
 
-- **Cadence: daily.** The cron fires 6-hourly but a `gate` job passes only the ~00:45 UTC slot
-  (`hour < 6`, allowing for GitHub's habitual cron lateness). Set the repo *variable*
-  `REFRESH_CADENCE=6h` to let every slot through — no workflow edit. `workflow_dispatch` always
-  passes the gate, so a manual **Run workflow** refreshes on demand.
+- **Cadence: 6-hourly, with a daily ocean anchor.** The cron fires at 00:45, 06:45, 12:45 and
+  18:45 UTC; every slot refreshes GFS and GFS-Wave, and the **06:45 anchor slot** additionally
+  refreshes CMEMS — the ocean products are daily means published once per day (~03:10–03:24 UTC),
+  so the other slots would re-download an identical field. Set the repo *variable*
+  `REFRESH_CADENCE=daily` to keep only the anchor slot — no workflow edit. `workflow_dispatch`
+  always runs everything, so a manual **Run workflow** refreshes on demand.
+- **How the toggle works.** Cron expressions can't read variables, so the schedule is written as
+  *two* entries — `45 6 * * *` (the anchor) and `45 0,12,18 * * *` (the rest), the same four
+  firings as the old `45 */6 * * *` — and the job's `if` compares `github.event.schedule`, which
+  carries the triggering cron string verbatim. Anything but the anchor entry is dropped when the
+  cadence is `daily`, and the CMEMS step's own `if` runs it only on the anchor (or any dispatch).
+  This replaced a `gate` job that tested `date -u +%H -lt 6`: GitHub starts scheduled runs
+  **15–85 minutes late** (measured across four consecutive slots), so a wall-clock gate would have
+  silently dropped a whole day's refresh had lateness ever pushed a firing past the boundary.
+  Cron-string comparison is immune to lateness, and a dropped slot is now a skipped job costing no
+  runner rather than a green ~5-second gate run.
+- **Snapshot age.** GFS publishes a cycle ~3.5–5 h after its nominal time and the scripts walk back
+  from four hours ago, so each slot lands on the cycle that is 6 h 45 m old — 00:45 takes the
+  previous 18z, 06:45 takes 00z, and so on. On-screen data is therefore **~7 h old just after a run
+  and at most ~13 h before the next one.** The 06:45 anchor also sits >3 h after the CMEMS daily
+  publication (~03:10–03:24 UTC), so the ocean layers show the **day-0 nowcast** — the old 00:45
+  anchor fired ~75 min *before* publication and got the previous production's +1-day-lead
+  forecast. For the same reason `REFRESH_CADENCE=daily` no longer sawtooths 8–32 h the way the
+  00:45 anchor did (it missed each morning's 00z, which lands ~03:30–05:00 UTC, and then held the
+  previous day's 18z for 24 hours): the 06:45 anchor catches both the fresh GFS 00z and the fresh
+  CMEMS production.
+- **CMEMS is fetched once per day, and time-pinned.** An earlier note here called the redundant
+  ocean re-downloads "about a minute" and not worth fixing; measurement said otherwise. The
+  store's dask chunking bundles 50 time steps per chunk, so `open_dataset` without a time subset
+  pulled **~990 MB per variable read to keep ~20 MB** — ~4.9 GB per run, ~19.8 GB/day at four
+  slots. `refresh_ocean.py` now pins `start_datetime`/`end_datetime` to one day (proven
+  bit-identical output on the full 1/12° grid) with a walk-back over earlier days as a safety
+  net, and the workflow's CMEMS step runs only on the anchor slot, taking CMEMS traffic to
+  **~105 MB/day**. The cost: a failed anchor run leaves the ocean layers stale for 24 h — no
+  later slot picks them up — accepted for the simpler gate. The three ocean objects simply keep
+  their previous bytes on non-anchor slots, since `upload_data.sh` only globs files that exist on
+  the runner.
 - **Secrets** (repository scope, Actions): `COPERNICUSMARINE_SERVICE_USERNAME` /
   `_PASSWORD` for CMEMS, plus `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` for the
   upload. GFS and GFS-Wave are anonymous. Vercel gets none of these — the site is fully static.
 - **Failure shape:** the upload step runs last, so a CMEMS outage or login failure uploads
   *nothing* rather than shipping a half-refreshed set; the bucket keeps serving the previous
   snapshot and the site never breaks, it just ages.
-- **Runtime ~4 minutes** for all 12 datasets (measured 3m49s and 3m48s over two runs). The CMEMS
-  ARCO reads are much faster from GitHub's runners than locally — the runbook's old 10–20 min
-  estimate was wrong — so `timeout-minutes: 20` is already generous.
+- **Runtime ~4 minutes** for a full 12-dataset run (measured 3m49s, 3m48s and 3m25s) — free,
+  since Actions minutes are unmetered on public repos. The CMEMS step was ~98 s of that; the
+  time-pinned open should take it to ~20 s (dominated by `open_dataset` metadata round-trips),
+  and the three non-anchor slots skip it entirely. `timeout-minutes: 20` is already generous.
 
 ### Credentials
 
@@ -529,10 +563,14 @@ Each entry is root cause → fix, with how it was verified.
 
 ## Next steps
 
-- **Confirm the cadence gate's skip path.** The daily-pass and manual-dispatch paths are proven by
-  the first run; the *skip* branch has only been dry-run tested. Any non-00:45 UTC firing should
-  appear as a ~5 s green gate-only run logging `REFRESH_CADENCE=daily — skipping this 6-hour slot`.
-  Also note GitHub disables cron in repos idle for 60 days (public repos get a warning email first).
+- **Watch a full 6-hourly day.** The dispatch path is proven by real runs, but the scheduled slots
+  under the anchor schedule are not, so the first day is worth checking against the bucket: all
+  four slots should advance the GFS/GFS-Wave `refTime` by one cycle each, and only the 06:45
+  anchor should touch the three ocean objects (their `Last-Modified` must hold still elsewhere).
+  Note also that GitHub disables cron in repos idle for 60 days (public repos get a warning email
+  first), and that the `REFRESH_CADENCE=daily` branch is untested — it drops cron strings rather
+  than running a gate, so verify a skipped slot logs nothing and consumes no runner before relying
+  on it.
 - **Bucket custom domain.** The r2.dev development URL is rate-limited by Cloudflare, documented as
   not-for-production, and serves the weather JSONs **uncompressed** ([Data/code
   split](#datacode-split)). A custom domain in front of the bucket buys Brotli/gzip and drops the
@@ -555,6 +593,48 @@ Each entry is root cause → fix, with how it was verified.
   copernicusmarine awscli` (the system Python is PEP-668 managed, so a plain `pip3 install` fails).
 
 ## Changes
+
+### 2026-08-18
+
+- **Diagnosed the 3–5 second scheduled runs** as working-as-designed, not failures. With
+  `REFRESH_CADENCE` unset the `gate` job skipped the 06:45, 12:45 and 18:45 UTC slots, leaving
+  `refresh` as `skipped` and the run green in ~6 s; the 00:45 slot did the real work (run
+  31987036925, 02:07:59 → 02:11:24 UTC, all 14 steps green, all 12 objects uploaded). Two things
+  made this look broken: the run list's "Scheduled" column is the *trigger*, not a pending status,
+  and GitHub's cron lateness moves the firings well away from `:45` — the four slots actually
+  started at 19:00, 02:08, 07:37 and 13:25 UTC, i.e. 15 to 83 minutes late.
+- **Traced the site's 25-hour-old wind snapshot** to the cadence rather than to a bug. The bucket
+  object carried `refTime` `2026-08-16T18:00:00Z` with `Last-Modified` 02:11:22Z: at 02:08 the
+  walk-back starts at `now − 4 h` → 18z 16 Aug, which was the newest *published* cycle, since 00z
+  17 Aug does not reach NOMADS until ~03:30–05:00. So the daily slot structurally misses each
+  morning's 00z and the displayed data sawtoothed between ~8 h and ~32 h old.
+- **Cadence switched to 6-hourly**, putting the on-screen snapshot in a ~7–13 h band. The `gate`
+  job is gone: the schedule is now two cron entries (`45 0 * * *`, `45 6,12,18 * * *`) and the
+  cadence check is a job-level `if` on `github.event.schedule`, which carries the triggering cron
+  string verbatim. The old `date -u +%H -lt 6` test had only ~5 h of slack against cron lateness
+  already measured at up to 83 min, and any overshoot would have cost the entire day's refresh —
+  the new check can't be affected by *when* a run starts. `REFRESH_CADENCE=daily` still restores
+  the single 00:45 slot, now by dropping a cron string instead of burning a runner per skipped slot.
+- **Smoke-tested by dispatch** (3m30s, one `refresh` job, all 11 steps green — an invalid `if`
+  would have been a startup failure, so the expression is confirmed to parse and evaluate). The
+  bucket advanced from GFS **16 Aug 18z → 17 Aug 12z**, i.e. from a 25-hour-old snapshot to a
+  7-hour-old one, which is the new cadence's band exactly. The old workflow's last act was a final
+  gate skip at 19:15:19 UTC, 34 s before this commit landed.
+- **CMEMS over-fetch found and fixed — ~19.8 GB/day → ~105 MB/day.** `refresh_ocean.py` opened
+  the dataset with no time selection; the store's dask chunking bundles 50 time steps per chunk,
+  so slicing one day afterwards still materialised them all — measured **989.6 MB on the wire to
+  keep 20.6 MB** per variable read, five reads per run. The open is now pinned with
+  `start_datetime`/`end_datetime` (proven bit-identical: same record, dtype, axes and every value
+  on the full 1/12° grid — resolution and coarsening untouched) plus a `candidate_days()`
+  walk-back mirroring the GFS scripts', which raises after 8 misses instead of silently serving
+  old data.
+- **CMEMS fetches moved to a single daily anchor slot, 00:45 → 06:45 UTC.** The ocean products
+  are `P1D-m` daily means published ~03:10–03:24 UTC, so the schedule became `45 6 * * *`
+  (anchor) + `45 0,12,18 * * *` and the CMEMS step's `if` runs it only on the anchor (or any
+  dispatch). Moving the anchor matters twice over: 00:45 fired ~75 min *before* the CMEMS
+  publication, so it always took the previous production's +1-day-lead forecast, and it was also
+  the slot that structurally missed each morning's GFS 00z under `REFRESH_CADENCE=daily`. At
+  06:45 both are fresh; firing times are unchanged.
 
 ### 2026-08-17
 

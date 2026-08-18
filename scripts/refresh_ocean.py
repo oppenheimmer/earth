@@ -45,8 +45,12 @@ Depth:
 Output is grib2json-compatible (the subset of header fields js/wind.js reads).
 Land cells are null, which the engine renders as charcoal.
 
-The dataset is a daily mean; the store also holds forecast data. The newest
-day <= the requested day is used.
+The dataset is a daily mean; the store also holds ~8 forecast days. The open
+is pinned to a single day (start/end datetime) so only that day's chunks are
+transferred — an unpinned open is chunked 50 time steps deep and downloads
+~990 MB per variable to keep ~20 MB. A walk-back tries earlier days, newest
+first, so the newest day <= the requested day is used; it raises after 8
+misses rather than silently serving old data.
 """
 
 import json
@@ -277,6 +281,12 @@ def coarsen(full):
 # Copernicus fetch
 # ---------------------------------------------------------------------------
 
+def candidate_days(day, count=8):
+    """Yield days, newest first, from the requested day backwards."""
+    for i in range(count):
+        yield day - np.timedelta64(i, "D")
+
+
 def fetch(product, day):
     """
     Fetch the latest daily mean <= day from the credentialed CMEMS 1/12-degree
@@ -294,18 +304,39 @@ def fetch(product, day):
     print("[CMEMS] Requested date: %s" % day)
     print()
 
-    def open_remote_dataset():
+    def open_remote_dataset(pinned_day):
+        # Pinning start/end to one day keeps the transfer to that day's
+        # chunks; without it xarray materialises 50-step time chunks.
         return copernicusmarine.open_dataset(
             dataset_id=product["dataset_id"],
             variables=product["variables"],
             minimum_depth=product["depth"][0],
             maximum_depth=product["depth"][1],
+            start_datetime=str(pinned_day),
+            end_datetime=str(pinned_day),
         )
 
-    ds = run_with_progress(
-        "[CMEMS] Opening remote dataset",
-        open_remote_dataset,
-    )
+    # A day outside the store's time range raises (time is not clamped the
+    # way depth is), so step back a day at a time until one opens.
+    for candidate in candidate_days(day):
+        try:
+            ds = run_with_progress(
+                "[CMEMS] Opening remote dataset for %s" % candidate,
+                lambda pinned_day=candidate: open_remote_dataset(pinned_day),
+            )
+        except copernicusmarine.CoordinatesOutOfDatasetBounds:
+            print("[CMEMS] No record for %s; stepping back a day." % candidate)
+            continue
+
+        if ds.sizes.get("time", 0) == 0:
+            print("[CMEMS] No record for %s; stepping back a day." % candidate)
+            continue
+
+        break
+    else:
+        raise RuntimeError(
+            "no CMEMS daily mean within 8 days on or before %s" % day
+        )
 
     print()
     print("[CMEMS] Dataset opened successfully.")
@@ -318,20 +349,9 @@ def fetch(product, day):
         pass
 
     print()
-    print("[CMEMS] Reading available time coordinates...", flush=True)
 
-    idx = int(
-        np.searchsorted(
-            ds.time.values,
-            day + np.timedelta64(1, "h"),
-        )
-    ) - 1
-
-    if idx < 0:
-        raise RuntimeError("no CMEMS data on or before %s" % day)
-
-    when = ds.time.values[idx]
-    sel = ds.isel(time=idx, depth=0)
+    when = ds.time.values[0]
+    sel = ds.isel(time=0, depth=0)
     selected_depth = float(sel.depth.values)
 
     print("[CMEMS] Selected record: %s" % when)

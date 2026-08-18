@@ -1,37 +1,30 @@
 name: refresh-data
 on:
   schedule:
-    - cron: "45 */6 * * *"   # fires 6-hourly; the gate job picks daily vs 6h
-  workflow_dispatch: {}       # manual "Run workflow" button, always runs
+    # The same four firings as "45 */6 * * *", split into two entries so the
+    # checks below can tell the slots apart: github.event.schedule carries the
+    # triggering cron string verbatim. 06:45 is the anchor because it sits
+    # after both the CMEMS daily publication (~03:10-03:24 UTC) and GFS 00z
+    # (~03:30-05:00 UTC).
+    - cron: "45 6 * * *"         # anchor: ocean refresh + the only slot at REFRESH_CADENCE=daily
+    - cron: "45 0,12,18 * * *"   # the other slots — GFS/GFS-Wave only, dropped when cadence is daily
+  workflow_dispatch: {}          # manual "Run workflow" button, always runs everything
 permissions:
   contents: read
 concurrency:
   group: refresh-data
   cancel-in-progress: false   # never kill a half-finished upload
 jobs:
-  gate:
-    runs-on: ubuntu-latest
-    outputs:
-      run: ${{ steps.decide.outputs.run }}
-    steps:
-      - id: decide
-        env:
-          CADENCE: ${{ vars.REFRESH_CADENCE || 'daily' }}
-        run: |
-          # daily (default): only the ~00:45 UTC firing passes (hour < 6
-          # allows for GitHub's cron start delays); 6h: every firing passes;
-          # manual dispatch always passes.
-          if [ "${{ github.event_name }}" != "schedule" ] \
-             || [ "$CADENCE" = "6h" ] \
-             || [ "$(date -u +%H)" -lt 6 ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "REFRESH_CADENCE=$CADENCE — skipping this 6-hour slot"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
   refresh:
-    needs: gate
-    if: needs.gate.outputs.run == 'true'
+    # 6-hourly by default: every slot runs. Set the repo variable
+    # REFRESH_CADENCE=daily to keep only the 06:45 UTC anchor slot. Manual
+    # dispatch always runs. Comparing cron strings rather than the wall clock
+    # keeps this correct however late GitHub starts a run, and a dropped slot
+    # costs no runner.
+    if: >-
+      github.event_name != 'schedule'
+      || github.event.schedule == '45 6 * * *'
+      || vars.REFRESH_CADENCE != 'daily'
     runs-on: ubuntu-latest
     timeout-minutes: 20   # observed runtime ~4 min; kills a hung run well before the next slot
     steps:
@@ -52,6 +45,12 @@ jobs:
       - name: Refresh GFS-Wave (anonymous)
         run: python scripts/refresh_waves.py
       - name: Refresh CMEMS ocean (credentials)
+        # The CMEMS products are P1D-m daily means published once per day, so
+        # only the anchor slot fetches them — the other slots would re-download
+        # an identical field. Skipping this step just leaves the 3 ocean JSONs
+        # unwritten, so the upload glob ships 9 files and the bucket keeps the
+        # previous ocean objects.
+        if: github.event_name != 'schedule' || github.event.schedule == '45 6 * * *'
         env:
           COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
           COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
