@@ -12,6 +12,7 @@ html, body {
     position: absolute;
     inset: 0;
     cursor: grab;
+    touch-action: none;   /* the engine owns pinch/pan; without this the browser eats them */
 }
 
 #display:active {
@@ -124,17 +125,6 @@ html, body {
     background: rgba(255, 213, 128, 0.12) !important;
 }
 
-.layer:disabled {
-    color: #567 !important;
-    cursor: default;
-}
-
-.soon {
-    font-size: 0.58rem;
-    color: #456;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-}
 
 #hud a {
     pointer-events: auto;

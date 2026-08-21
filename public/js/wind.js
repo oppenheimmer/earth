@@ -294,10 +294,15 @@
     var projection = d3.geoOrthographic().clipAngle(90);
     var initialScale;
 
+    // Called once, from init(). The scale is assigned unconditionally: d3.geoOrthographic()
+    // ships a non-zero default (249.5), so the old `projection.scale() ? … : initialScale`
+    // guard always kept that default and the globe never actually rendered at the fitted
+    // scale — a fixed 249.5 px radius on every display, and #zoom=1 meant a *different*
+    // view than the one the page booted with.
     function fitProjection() {
         initialScale = Math.min(view.width, view.height) * 0.42;
         projection
-            .scale(projection.scale() ? projection.scale() : initialScale)
+            .scale(initialScale)
             .translate([view.width / 2, view.height / 2])
             .precision(0.5);
     }
@@ -862,6 +867,7 @@
     // OSCAR value). Matched to nullschool by user comparison: moderately dense,
     // slightly-thicker-than-wind strokes, faster motion (was 1/2500 · ×7 · 1.2 px).
     var OCEAN_PARTICLES = {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7};
+    var OCEAN_PLACEHOLDER = "click a point for current speed";
     // Ocean overlays render dimmer than the atmosphere's OVERLAY_ALPHA: the near-black
     // sphere bleeds through, deepening the calm-sea colors so the trails/crests read on top.
     var OCEAN_ALPHA = Math.floor(0.58 * 255);
@@ -932,6 +938,7 @@
         "ocean": {file: OCEAN_CURRENTS, label: "Ocean Currents @ Surface",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true,  // charcoal continents above the overlay, nullschool-style
+            placeholder: OCEAN_PLACEHOLDER,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
             scalar: CURRENT_SPEED_SCALAR},
         // 25.21 m: near the base of the tropical mixed layer — the flow starts diverging
@@ -939,12 +946,29 @@
         "ocean25": {file: DATA_ROOT + "current-ocean-currents-25m-cmems-0.25.json",
             label: "Ocean Currents @ 25 m",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
-            landFill: true,
+            landFill: true, placeholder: OCEAN_PLACEHOLDER,
+            particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
+            scalar: CURRENT_SPEED_SCALAR},
+        // 109.73 m: below the seasonal thermocline — the wind-driven signal is gone
+        // and the flow is dominated by the large-scale gyres.
+        "ocean110": {file: DATA_ROOT + "current-ocean-currents-110m-cmems-0.25.json",
+            label: "Ocean Currents @ 110 m",
+            credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
+            landFill: true, placeholder: OCEAN_PLACEHOLDER,
+            particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
+            scalar: CURRENT_SPEED_SCALAR},
+        // 453.94 m: intermediate water. Speeds here are far below the 1.5 m/s
+        // surface domain, so most of the map sits at the palette's deep-blue end —
+        // that is the physical result, not a scaling bug.
+        "ocean450": {file: DATA_ROOT + "current-ocean-currents-450m-cmems-0.25.json",
+            label: "Ocean Currents @ 450 m",
+            credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
+            landFill: true, placeholder: OCEAN_PLACEHOLDER,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
             scalar: CURRENT_SPEED_SCALAR},
         "sst": {file: OCEAN_CURRENTS, label: "Sea Water Temperature @ Surface",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
-            landFill: true,
+            landFill: true, placeholder: "click a point for sea temperature",
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
             scalar: {
                 file: DATA_ROOT + "current-ocean-temp-cmems-0.25.json",
@@ -959,7 +983,7 @@
             }},
         "waves": {file: WAVE_FLOW, label: "Ocean Waves",
             credit: WAVE_CREDIT, dateLabel: WAVE_DATE_LABEL,
-            landFill: true,
+            landFill: true, placeholder: "click a point for wave height",
             particles: WAVE_PARTICLES, flowFormat: seconds,
             scalar: {
                 file: DATA_ROOT + "current-ocean-wave-height-gfswave-0.25.json",
@@ -983,6 +1007,7 @@
     var DEFAULT_CREDIT = "GFS 0.25&deg; &nbsp;|&nbsp; NCEP / US National Weather Service";
     var DEFAULT_PARTICLES = {velocityScale: VELOCITY_SCALE, maxIntensity: MAX_INTENSITY};
     var KMH = function (v) { return (v * 3.6).toFixed(0) + " km/h"; };  // default flow readout
+    var DEFAULT_PLACEHOLDER = "click a point for wind speed";
 
     var currentCancel = {requested: false};
     var recomputeTimer = null;
@@ -992,6 +1017,7 @@
     var particleOpts = DEFAULT_PARTICLES;  // the current layer's animation tuning
     var landFill = false;     // charcoal land above the overlay (ocean layers)
     var flowFormat = KMH;     // click-readout format for the particle flow's speed
+    var currentLayerId = null;  // active layer id — the hash write-back's source of truth
 
     function cancelWork() {
         currentCancel.requested = true;
@@ -1012,9 +1038,36 @@
         setStatus("");
     }
 
+    // The hash doubles as the shareable view state: layer, center and zoom are
+    // written back after every settled interaction, so copying the URL or reloading
+    // restores exactly what is on screen. replaceState, not location.hash, to avoid
+    // filling the back button with every drag. A #data= override is carried through
+    // verbatim — DATA_ROOT resolved from it at load, so dropping it would silently
+    // send a reload back to the R2 bucket.
+    var hashDataOverride = new URLSearchParams(location.hash.slice(1)).get("data");
+    function writeHash() {
+        if (!currentLayerId) return;
+        var r = projection.rotate();
+        var parts = [
+            "layer=" + currentLayerId,
+            "rotate=" + r[0].toFixed(1) + "," + r[1].toFixed(1),
+            "zoom=" + (projection.scale() / initialScale).toFixed(2)
+        ];
+        if (hashDataOverride) parts.push("data=" + hashDataOverride);
+        history.replaceState(null, "", "#" + parts.join("&"));
+    }
+
+    /** Zoom is clamped to 0.5x-8x of the fitted scale, wheel and pinch alike. */
+    function clampScale(scale) {
+        return Math.max(initialScale * 0.5, Math.min(initialScale * 8, scale));
+    }
+
     function scheduleRecompute() {
         clearTimeout(recomputeTimer);
-        recomputeTimer = setTimeout(recompute, 200);
+        recomputeTimer = setTimeout(function () {
+            writeHash();   // every gesture settles here — drag, wheel, pinch, resize
+            recompute();
+        }, 200);
     }
 
     function recompute() {
@@ -1035,6 +1088,7 @@
     function loadLayer(id) {
         var layer = LAYERS[id];
         if (!layer) return;
+        currentLayerId = id;
         cancelWork();
         clearTimeout(recomputeTimer);
         clearCanvas(animCanvas);
@@ -1052,6 +1106,13 @@
                 b.hidden = b !== body;
             });
         }
+        // `label` is the layer's human name — it titles the document (so a bookmark
+        // or a tab says which layer it is) and nothing else reads it.
+        document.title = "earth · " + layer.label;
+        // The readout is per-layer: the old text is in the previous layer's units,
+        // and the units differ (km/h, m/s, m · s).
+        setLocation(layer.placeholder || DEFAULT_PLACEHOLDER);
+        writeHash();
         setStatus("downloading data…");
         var fetches = [fetch(layer.file, {cache: "no-cache"}).then(function (r) {
             if (!r.ok) throw new Error("wind data: HTTP " + r.status);
@@ -1088,14 +1149,31 @@
     function attachInteraction() {
         var display = d3.select("#display");
         var rotateStart, pointerStart, moved;
+        // Two-finger pinch runs beside d3.drag rather than through it. The flag stays
+        // set until every finger lifts, so the one-finger drag that d3 may already
+        // have running (finger 1 down, finger 2 added later) neither rotates the globe
+        // mid-pinch nor fires a click readout when the gesture ends.
+        var pinching = false, pinchStartDist = 0, pinchStartScale = 0;
+
+        function touchSpread(touches) {
+            var dx = touches[0].clientX - touches[1].clientX;
+            var dy = touches[0].clientY - touches[1].clientY;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
 
         var drag = d3.drag()
+            // Reject the second finger so a pinch never starts a rotation as well.
+            .filter(function (event) {
+                if (event.touches) return event.touches.length === 1;
+                return !event.ctrlKey && !event.button;
+            })
             .on("start", function (event) {
                 rotateStart = projection.rotate();
                 pointerStart = [event.x, event.y];
                 moved = false;
             })
             .on("drag", function (event) {
+                if (pinching) return;
                 if (!moved) {
                     var dx0 = event.x - pointerStart[0], dy0 = event.y - pointerStart[1];
                     if (dx0 * dx0 + dy0 * dy0 < 9) return;  // ignore sub-3px jitter so clicks stay clicks
@@ -1110,6 +1188,7 @@
                 previewOverlayThrottled();
             })
             .on("end", function (event) {
+                if (pinching) return;
                 if (moved) {
                     scheduleRecompute();
                 }
@@ -1124,12 +1203,47 @@
             event.preventDefault();
             startManipulation();
             var k = Math.exp(-event.deltaY * 0.0018);
-            var scale = Math.max(initialScale * 0.5, Math.min(initialScale * 8, projection.scale() * k));
-            projection.scale(scale);
+            projection.scale(clampScale(projection.scale() * k));
             drawMap(true);
             previewOverlayThrottled();
             scheduleRecompute();
         }, {passive: false});
+
+        // Pinch zoom: the scale tracks the ratio of finger spread to its value at
+        // gesture start, which keeps it absolute — no drift over a long pinch — and
+        // reuses the wheel's clamp so both paths stop at the same 0.5x-8x limits.
+        // #display sets touch-action: none, without which the browser would consume
+        // the gesture as a page zoom and no touchmove would arrive.
+        var node = display.node();
+        node.addEventListener("touchstart", function (event) {
+            if (event.touches.length !== 2) return;
+            event.preventDefault();
+            pinching = true;
+            pinchStartDist = touchSpread(event.touches);
+            pinchStartScale = projection.scale();
+            startManipulation();
+        }, {passive: false});
+
+        node.addEventListener("touchmove", function (event) {
+            if (!pinching || event.touches.length !== 2 || !pinchStartDist) return;
+            event.preventDefault();
+            projection.scale(clampScale(pinchStartScale * touchSpread(event.touches) / pinchStartDist));
+            drawMap(true);
+            previewOverlayThrottled();
+        }, {passive: false});
+
+        function endPinch(event) {
+            if (!pinching || event.touches.length > 0) return;  // hold until every finger lifts
+            pinchStartDist = 0;
+            scheduleRecompute();
+            // Clear on the next tick, not synchronously: a d3.drag "end" can fire from
+            // this same touchend (finger 1 was down before finger 2 landed) and the
+            // listener order between d3's handler and this one is not guaranteed, so the
+            // flag has to outlive the event turn for its guards to hold.
+            setTimeout(function () { pinching = false; }, 0);
+        }
+        node.addEventListener("touchend", endPinch);
+        node.addEventListener("touchcancel", endPinch);
     }
 
     var resizeTimer = null;
@@ -1156,10 +1270,41 @@
             " " + pad(date.getUTCHours()) + ":00 UTC";
     }
 
+    // The view a visitor gets when their timezone yields nothing: centered over the
+    // Bay of Bengal, which was the fixed starting view before homeCenter() existed.
+    var DEFAULT_CENTER = [80, 15];
+
+    /**
+     * Coarse "where is the visitor" for the initial view, from the browser's IANA timezone
+     * via the generated js/tz-centers.js table. Intl asks no permission and costs no
+     * request, so unlike navigator.geolocation there is no prompt, and unlike an IP lookup
+     * nothing about the visitor leaves the page — not even to this site. The table is
+     * country-grained on purpose: every zone of a country resolves to the same centroid,
+     * so the render can place a visitor no more precisely than their country.
+     *
+     * Returns DEFAULT_CENTER when the zone is absent from the table (Etc/UTC, a zone newer
+     * than the table) or when anything about Intl is unavailable.
+     */
+    function homeCenter() {
+        var table = window.TZ_COUNTRY_CENTERS;
+        var zone;
+        try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone; }
+        catch (e) { return DEFAULT_CENTER; }
+        if (!table || !zone) return DEFAULT_CENTER;
+        // Keys hold every zone of one country, space-separated; the padding makes the
+        // match exact, so "Asia/Kolkata" cannot hit a longer name that contains it.
+        var keys = Object.keys(table);
+        for (var i = 0; i < keys.length; i++) {
+            if ((" " + keys[i] + " ").indexOf(" " + zone + " ") >= 0) return table[keys[i]];
+        }
+        return DEFAULT_CENTER;
+    }
+
     function init() {
         sizeCanvases();
         fitProjection();
-        projection.rotate([-80, -15, 0]);  // start centered over the Indian Ocean
+        var home = homeCenter();
+        projection.rotate([-home[0], -home[1], 0]);  // rotation is the negation of the centre
 
         // Optional initial view via URL hash, e.g. #rotate=-128.5,-21.5&zoom=5
         // (also the hook used for headless testing of zoomed/rotated views).

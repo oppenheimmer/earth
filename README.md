@@ -4,7 +4,7 @@
 
 A minimal replica of the meteorological visualization at
 [earth.nullschool.net](https://earth.nullschool.net/): an orthographic globe with a colored
-scalar field and thousands of particles advected through a live vector field. Eleven layers
+scalar field and thousands of particles advected through a live vector field. Thirteen layers
 across two domains (Atmosphere, Ocean) are driven by NOAA GFS, NOAA GFS-Wave and Copernicus
 Marine (CMEMS) data.
 
@@ -31,7 +31,7 @@ build step, no framework. The core algorithms are ported from
 Any static server works — `start.sh` is just
 `python3 -m http.server 8420 -d public` plus an `xdg-open`.
 
-The twelve weather datasets are **not in the repo** ([Data](#data)). For a working local page,
+The fourteen weather datasets are **not in the git repo** ([Data](#data)). For a working local page,
 either refresh them into `public/data/` (see [Refreshing the data](#refreshing-the-data)) or
 borrow the deployed bucket with the `#data=` hash below.
 
@@ -39,10 +39,20 @@ All URL-hash options are read once at load and can be combined with `&`:
 
 | Hash | Meaning |
 |---|---|
-| `#layer=<id>` | initial layer: `surface`, `1000hpa`, `500hpa`, `10hpa`, `temperature`, `rh`, `dew`, `ocean`, `ocean25`, `sst`, `waves` |
+| `#layer=<id>` | initial layer: `surface`, `1000hpa`, `500hpa`, `10hpa`, `temperature`, `rh`, `dew`, `ocean`, `ocean25`, `ocean110`, `ocean450`, `sst`, `waves` |
 | `#rotate=λ,φ` | initial center, e.g. `#rotate=-128.5,-21.5` (φ clamped to ±90°) |
 | `#zoom=k` | initial zoom, 0.5–8× the fitted scale |
 | `#data=<url>` | fetch the weather JSONs from this base URL instead of local files / R2 |
+
+Without `#rotate=`, the globe opens centered on the visitor's country, inferred from the browser's
+timezone with no permission prompt and no network request — see
+[Initial view: timezone lookup](#initial-view-timezone-lookup).
+
+The hash is **written back** as the view settles (on a layer change, and 200 ms after the last
+drag, wheel or pinch), so the address bar always describes what is on screen and a copied URL
+reproduces it. `history.replaceState` is used, so dragging does not fill the back button, and a
+`#data=` override is carried through verbatim. Reading is still boot-only: editing the hash by
+hand needs a reload to take effect.
 
 `#layer=` and `#rotate=`/`#zoom=` are also the headless-testing hooks: the burger menu needs a
 real click, and a specific view can otherwise only be reached by dragging.
@@ -54,9 +64,7 @@ reload.
 Deployment: live at **[globe-climatesim.vercel.app](https://globe-climatesim.vercel.app)**. Vercel
 serves `public/` (`vercel.json` sets `outputDirectory` and cache headers), the weather JSONs come
 from a Cloudflare R2 bucket, and `.github/workflows/refresh-data.yml` refreshes them every six
-hours without touching git ([Automated refresh](#automated-refresh)). The full runbook — bucket,
-CORS, secrets, cadence toggle, maintenance playbook — lives in `earth-vercel-deploy.md` at the repo
-root, which is **git-ignored on purpose** (it holds ops notes and credentials handling).
+hours without touching git ([Automated refresh](#automated-refresh)).
 
 ## Project structure
 
@@ -65,26 +73,27 @@ root, which is **git-ignored on purpose** (it holds ops notes and credentials ha
 ├── vercel.json                  # points Vercel's output at public/, sets cache headers
 ├── start.sh                     # local launcher: serves public/ on :8420, opens a browser
 ├── README.md
-├── earth-vercel-deploy.md       # deployment runbook — git-ignored, local only
 ├── asset/view.png               # the screenshot above
 ├── .env/                        # git-ignored credentials: copernicusmarine, r2
 ├── .github/workflows/
-│   └── refresh-data.yml         # 6-hourly refresh of all 12 datasets → R2 (no commits, no deploys)
+│   └── refresh-data.yml         # 6-hourly refresh of all 14 datasets → R2 (no commits, no deploys)
 ├── scripts/
 │   ├── refresh_wind.py          # GFS winds + 2 m scalars via NOMADS, pygrib (anonymous)
 │   ├── refresh_ocean.py         # CMEMS currents + thetao via copernicusmarine (credentialed)
 │   ├── refresh_waves.py         # GFS-Wave (WAVEWATCH III) height/period/direction (anonymous)
-│   └── upload_data.sh           # ships public/data/current-*.json to the Cloudflare R2 bucket
+│   ├── upload_data.sh           # brotli-compresses public/data/current-*.json into the R2 bucket
+│   └── gen_tz_centers.js        # regenerates public/js/tz-centers.js from tzdata + countries-50m
 └── public/                      # the deployable site (code + static assets only)
     ├── index.html               # four stacked canvases (#map, #overlay, #animation, #lines) + HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
     ├── js/wind.js               # the whole engine (~1220 lines, one IIFE)
     ├── js/menu.js               # burger toggle, tab switching, layerchange dispatch (~40 lines)
+    ├── js/tz-centers.js         # GENERATED: timezone → country centroid, for the initial view
     ├── libs/
     │   ├── d3.v7.min.js         # vendored D3 v7 (includes d3-scale-chromatic)
     │   └── topojson-client.min.js
     └── data/
-        ├── current-*.json       # the 12 weather datasets — GIT-IGNORED (data/code split):
+        ├── current-*.json       # the 14 weather datasets — GIT-IGNORED (data/code split):
         │                        #   refresh scripts write them here for local dev,
         │                        #   upload_data.sh ships them to Cloudflare R2 for production,
         │                        #   wind.js picks local vs R2 by hostname (see Data)
@@ -152,14 +161,21 @@ boot. `public/js/menu.js` only translates clicks into events; the engine owns al
    respawns any particle whose per-frame move exceeds what the dataset's maximum speed can
    produce at the current zoom (×2 slack) — see [Fixed bugs](#fixed-bugs) for the sizing.
 6. **Interaction** — drag rotates (sensitivity `75 / scale` °/px, φ clamped to ±90°, sub-3 px
-   movement stays a click), wheel zooms (`exp(-deltaY × 0.0018)`, clamped to 0.5×–8× of the
-   fitted scale), a click reads the values under the pointer via `projection.invert` +
-   `interpolate`. Any manipulation cancels the running field/animation through a shared cancel
+   movement stays a click), wheel and two-finger pinch zoom (`exp(-deltaY × 0.0018)` and the
+   finger-spread ratio respectively, both through the same `clampScale()` 0.5×–8× limit), a click
+   reads the values under the pointer via `projection.invert` + `interpolate`. Pinch runs *beside*
+   `d3.drag` rather than through it: the drag filter rejects any touch event carrying more than one
+   touch, and a `pinching` flag — held until every finger lifts — suppresses both the rotate and the
+   click readout from a one-finger drag that d3 may already have running when a second finger lands.
+   `#display` sets `touch-action: none`, without which the browser consumes the gesture as a page
+   zoom and no `touchmove` ever arrives. Any manipulation cancels the running field/animation through a shared cancel
    token and clears the trails; while the pointer moves, `drawOverlayPreview()` repaints the
    color field **live at low resolution** (every 5th px, throttled to ~25 fps, upscaled with
    canvas smoothing) so the "smudged" overlay tracks the globe outline exactly, like nullschool.
    A 200 ms debounce after release triggers the full recompute, whose `putImageData` replaces the
    preview wholesale; a resize (250 ms debounce) does the same while preserving relative zoom.
+   That same 200 ms debounce is where the URL hash is written back, so every gesture — drag, wheel,
+   pinch, resize — converges on one place instead of each handler writing its own.
    Note: the preview must mask off-disc pixels **by radius** — d3-geo clamps `asin`, so
    `projection.invert` returns finite mirrored coordinates outside the globe.
 
@@ -167,7 +183,8 @@ boot. `public/js/menu.js` only translates clicks into events; the engine owns al
 
 `LAYERS` in `wind.js` maps a layer id to its flow file, optional `scalar` spec
 (`{file, lut, min, max, scaleLabel, format}` or `{fromMagnitude: true, …}`), particle tuning,
-credit/date lines, `landFill` and the click-readout format. `index.html`'s menu buttons carry
+credit/date lines, `landFill`, the click-readout format, the readout's idle `placeholder` and the
+`label` that titles the document. `index.html`'s menu buttons carry
 matching `data-layer` ids. One layer is displayed at a time; layers are never combined.
 
 | Layer id | Menu button | Particles from | Overlay | Scale |
@@ -181,6 +198,8 @@ matching `data-layer` ids. One layer is displayed at a time; layers are never co
 | `dew` | Atmosphere → Dew Point | GFS 10 m u/v | 2 m DPT through `PuBuGn` | -40 – 35 °C |
 | `ocean` | Ocean → Current-Surface | CMEMS uo/vo @ 0.494 m | current speed, segmented ocean palette | 0 – 1.5 m/s |
 | `ocean25` | Ocean → Current-25m | CMEMS uo/vo @ 25.211 m | 〃 | 〃 |
+| `ocean110` | Ocean → Current-110m | CMEMS uo/vo @ 109.729 m | 〃 | 〃 |
+| `ocean450` | Ocean → Current-450m | CMEMS uo/vo @ 453.938 m | 〃 | 〃 |
 | `sst` | Ocean → Temperature | CMEMS surface currents | CMEMS thetao through `bwr` | 0 – 35 °C |
 | `waves` | Ocean → Waves | GFS-Wave propagation u/v (magnitude = peak period) | significant wave height, blue → saffron | 0 – 15 m |
 
@@ -220,8 +239,7 @@ The streak-guard threshold is *not* a constant: it is computed per view as
 
 ### Tuning notes
 
-Why the numbers are what they are. All of it was settled by measurement against nullschool
-screenshots plus user review; see [Changes](#changes) for the order things happened in.
+See [Changes](#changes) for the order things happened in.
 
 - **Overlay color.** Wind speed maps onto the extended sinebow over 0–100 m/s (hence the
   "0 – 360 km/h" scale label), pastelized 22% toward white so the storm band reads bright
@@ -239,7 +257,7 @@ screenshots plus user review; see [Changes](#changes) for the order things happe
   brown, and constant high alpha let storm cores pile up into mush.
 - **Trail shape.** Fade 0.97/frame with a 100-frame life gives long fluid streamlines. Two
   de-whitening experiments (brightness ceiling 220, then speed-dependent alpha 0.6 → 0.35) were
-  measured and **reverted by user preference**: the brighter eyewall — ~4.8% white pixels in the
+  measured and reverted by user preference: the brighter eyewall — ~4.8% white pixels in the
   eyewall crop when measured, against nullschool's 0% — is accepted in exchange for the luminous
   long-streamline look. Nullschool's 0% comes from short dashes, deliberately not adopted for the
   wind layers.
@@ -260,10 +278,10 @@ screenshots plus user review; see [Changes](#changes) for the order things happe
 
 The bottom-left HUD is collapsed by default to a slim bar (`☰ earth` plus a transient status
 line, which stays visible while collapsed so load progress and errors always show). The burger
-expands `#menu-panel` upward, nullschool-style:
+expands `#menu-panel` upward:
 
 - **Domain tabs** stack vertically — each tab header sits directly above its own `.tab-body`, one
-  domain expanded at a time. Atmosphere holds seven layers, Ocean four; all are live.
+  domain expanded at a time. Atmosphere holds seven layers, Ocean six; all are live.
 - **Layer buttons** dispatch a `layerchange` `CustomEvent` with the layer id.
   `loadLayer()` in the engine swaps the dataset(s), restarts the pipeline, and syncs the
   active-button state (single source of truth), including revealing the tab that owns the layer
@@ -273,18 +291,82 @@ expands `#menu-panel` upward, nullschool-style:
   formatted as UTC — so the HUD always states which snapshot is on screen.
 - **Scale bar** (`#scale`) is painted from the active overlay's LUT, with `#scale-label` from its
   `scaleLabel`; the **click readout** (`#location`) prints the scalar value · the flow value ·
-  coordinates, formatted per layer (km/h for wind, m/s for currents, "m · s" for waves).
+  coordinates, formatted per layer (km/h for wind, m/s for currents, "m · s" for waves). Its idle
+  text is the layer's `placeholder`, reset on every layer switch — the previous layer's reading is
+  in the wrong units, and the markup's copy is only a pre-JS fallback.
+- **Document title** is `earth · <label>`, so a tab or bookmark says which layer it holds. That is
+  the only reader of `LAYERS[].label`.
 
 CSS gotcha: `.tab-body` uses `display: flex`, which beats the `hidden` attribute's UA-stylesheet
 `display: none` — hence the explicit `.tab-body[hidden] { display: none; }` rule. Headless
 gotcha: the burger can't be clicked, so screenshot the open panel by temporarily removing the
 `hidden` attribute from `#menu-panel`.
 
+### Initial view: timezone lookup
+
+On a hash-free load the globe opens centered on the visitor's **country**. `init()` reads
+`Intl.DateTimeFormat().resolvedOptions().timeZone` and looks the zone up in `js/tz-centers.js`,
+a generated table of 237 countries / 531 zones; the projection rotation is the negation of the
+centre it returns. Precedence is `#rotate=` → timezone → `[80, 15]`, the Bay of Bengal view the
+page shipped with, used whenever the zone is missing from the table (`UTC`, `Etc/GMT±N`, or a zone
+newer than the table).
+
+Why the timezone and not something more direct:
+
+- `navigator.geolocation` prompts, and its metre-level accuracy is wasted on a view that spans a
+  hemisphere.
+- An IP lookup would need a request on the boot path. Vercel's `x-vercel-ip-*` headers only reach
+  a Function — this is a pure-static deploy — and are unset locally.
+- `Intl` is synchronous and offline, so the rotation is still assigned before the first paint and
+  **nothing about the visitor leaves the browser**, not even to this site.
+
+The table is **country-grained on purpose**: every zone of a country resolves to one centroid, so
+the render cannot place a visitor more precisely than their country. Kolkata and Delhi get a
+pixel-identical globe; the US has ~50 zone names on one row, Australia ~24. Reading a row is the
+whole runtime cost — an exact match on the zone string, ~17 µs, no offset arithmetic anywhere.
+
+`scripts/gen_tz_centers.js` regenerates the table (`--check` reports without writing) from
+`/usr/share/zoneinfo` plus `public/data/countries-50m.json` — the topology the page itself draws, so
+a centre can never contradict the borders on screen. Each zone's city is located by
+point-in-polygon, snapped outward in rings when `zone.tab`'s minute-rounded coordinates land just
+offshore of the coarse outline (New York, Copenhagen and Lagos all miss it), and the country's
+spherical centroid is rounded to whole degrees. It uses `zone.tab`, not `zone1970.tab`, because the
+latter merges rows to `DE,DK,NO,SE,SJ Europe/Berlin` — one row, five countries, no way to tell them
+apart. Three guards, each of which has caught something real:
+
+| Guard | Why |
+|---|---|
+| every resolution cross-checked against the ISO code tzdata assigns the zone, with reviewed exceptions listed explicitly | a topology update cannot silently move a country; caught Jerusalem landing in Palestine's polygon and Büsingen in Switzerland's |
+| aliases recovered by hashing the TZif binaries, but only from hash groups belonging to **one** country | current tzdata links `Europe/Stockholm` to `Europe/Berlin`, so a naive pass would hand Swedish visitors a German view |
+| the run asserts every zone `Intl` lists resolves | chromium reports **`Asia/Calcutta`** for `TZ=Asia/Kolkata`, so without alias recovery Indian visitors would have taken the fallback |
+
+Two kinds of override are declared in the generator. **France** and the **US** use their largest
+polygon rather than their whole-country centroid: Natural Earth folds Guiana, Réunion, Martinique,
+Guadeloupe and Mayotte into one `France` feature, putting the centroid in the Bay of Biscay 825 km
+off the mainland, and Alaska plus Hawaii pull the US centre ~670 km northwest of the contiguous 48.
+Dispersed countries are deliberately left alone — for Indonesia, the Philippines and Kiribati a
+mid-archipelago point on open water genuinely is the country's centre, and their largest island sits
+off at one edge. A handful of zones resolve to the wrong polygon and are pinned to the ISO code
+tzdata already assigns them (Ceuta, El Aaiun, Jerusalem, Simferopol, Büsingen), which is the only
+rule applied to any contested case.
+
+Known limits, none of them fixable from here:
+
+- Countries sharing a **zone identifier** get the primary country. tzdata assigns `Europe/Zurich` to
+  `CH,DE,LI`, but Liechtenstein has its own `Europe/Vaduz` row, so this only bites if an engine
+  canonicalizes a link across countries — and that is **undetectable at runtime**, since
+  `Europe/Berlin` from a Swedish machine is identical to `Europe/Berlin` from a German one.
+- Legacy names are resolved by the **browser**, before this code runs, and not always well:
+  `TZ=CET` arrives as `Europe/Brussels` and `TZ=EST` as `America/Panama`, ~3400 km from the US east
+  coast. No table here can see that happened.
+- Microstates absent from the 50m topology fold into their neighbour (Vatican → Italy), which is the
+  right answer at country granularity, and 11 island states fall back to their zone's own city.
+
 ## Data
 
 ### Data/code split
 
-The `current-*` weather JSONs are **not in git**. The refresh scripts write them to
+The `current-*` weather JSONs are not in git. The refresh scripts write them to
 `public/data/` (git-ignored) so local dev works normally; production serves them from a
 **Cloudflare R2 bucket**. In `wind.js` every weather-file URL goes through `DATA_ROOT`, resolved
 once at load:
@@ -296,7 +378,7 @@ once at load:
    public base URL.
 
 All three paths are verified: localhost serving from `data/`, a cross-origin bucket via `#data=`,
-and — since 2026-08-17 — the deployed site itself, where `data/current-*.json` 404s on the Vercel
+and the deployed site itself, where `data/current-*.json` 404s on the Vercel
 origin and every weather fetch resolves to the bucket. The consequence that matters: data refreshes
 create no commits, no force-pushes and no Vercel deploys — the repo carries no history churn and
 Vercel only redeploys on code pushes.
@@ -305,36 +387,58 @@ Vercel only redeploys on code pushes.
 (`--cache-control "public, max-age=1800, must-revalidate"`). It globs `current-*.json`, so a
 dataset added by a future layer is picked up automatically. Required environment (locally from the
 git-ignored `.env/r2`): `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional
-`R2_BUCKET` (default `earth-data`).
+`R2_BUCKET` (default `earth-data`). It also needs the `brotli` binary on `PATH`.
 
-**The r2.dev URL does not compress.** An earlier note here claimed Cloudflare's edge gzips the
-JSON on the fly (~10 MB → ~2.5 MB); measured on 2026-08-17 that is false for the development
-URL — both `curl --compressed` and an explicit `Accept-Encoding: gzip` return the full raw body
-with no `Content-Encoding`. So every layer switch pulls its dataset uncompressed: ~100 MB for a
-click-through of all 12. Vercel *does* serve the code and topologies with `content-encoding: br`;
-Brotli for the weather files needs a **bucket custom domain** in front of R2 ([Next
-steps](#next-steps)).
+### Compression: pre-compressed objects, not edge compression
 
-### The twelve datasets
+**r2.dev never compresses on the fly** — re-measured 2026-08-21, offering `gzip, br, zstd` still
+returns the full raw body with no `Content-Encoding`. The fix is not a custom domain: R2 *stores*
+and serves a `Content-Encoding` you set at upload, so `upload_data.sh` brotli-compresses each file
+(`-q 9`) and uploads the compressed bytes with `--content-encoding br`. **The object key keeps the
+plain `.json` name**, so every URL is unchanged and `wind.js` needed no edit at all.
+
+Measured over the shipped set: **119.3 MB raw → 19.9 MB on the wire, 6.0×**, and every object
+decodes byte-identically to its local source. Three client behaviors were probed against r2.dev
+before adopting this:
+
+| Client sends | Server returns | Result |
+|---|---|---|
+| `Accept-Encoding: br, gzip` | `Content-Encoding: br` | compressed — the browser case |
+| `Accept-Encoding: gzip` only | *(no encoding)* | Cloudflare decompresses at the edge |
+| nothing | *(no encoding)* | Cloudflare decompresses at the edge |
+
+So clients that cannot take brotli are served correct raw bytes rather than breaking — the
+degradation is graceful, which is what makes this safe on the development URL. Rollback is a plain
+re-upload of the uncompressed files to the same keys.
+
+Why `-q 9`: across the datasets it beats `gzip -9` (17.3 MB vs 18.9 MB on the 12-dataset corpus)
+at roughly a third of the CPU, while `-q 11` costs ~7 s per file for another ~7%. Whole-run
+compression cost is ~11 s of CPU. Vercel independently serves the code and topologies with
+`content-encoding: br`, as it always has.
+
+### The fourteen datasets
 
 All in grib2json format (the subset of header fields `wind.js` reads), all 0.25° global grids,
-~100 MB total raw. GFS/GFS-Wave grids are 1440×721 with a 0° origin; the CMEMS grids are
-1440×681 with a -180° origin (the store stops at 80°S).
+~119 MB total raw / ~20 MB as served ([Compression](#compression-pre-compressed-objects-not-edge-compression)).
+GFS/GFS-Wave grids are 1440×721 with a 0° origin; the CMEMS grids are 1440×681 with a -180° origin
+(the store stops at 80°S). Sizes below are raw; the brotli figure is what actually crosses the wire.
 
-| File | Contents | Source / script | Product arg |
-|---|---|---|---|
-| `current-wind-surface-level-gfs-0.25.json` | 10 m u/v wind (~9.4 MB) | GFS via `refresh_wind.py` | `surface` |
-| `current-wind-1000hpa-gfs-0.25.json` | u/v @ 1000 hPa (~9.4 MB) | 〃 | `1000hpa` |
-| `current-wind-500hpa-gfs-0.25.json` | u/v @ 500 hPa (~9.9 MB) | 〃 | `500hpa` |
-| `current-wind-10hpa-gfs-0.25.json` | u/v @ 10 hPa (~10.1 MB) | 〃 | `10hpa` |
-| `current-temp-surface-level-gfs-0.25.json` | 2 m temperature, K (~6.2 MB) | 〃 | `temperature` |
-| `current-rh-surface-level-gfs-0.25.json` | 2 m relative humidity, % (~5.2 MB) | 〃 | `rh` |
-| `current-dewpoint-surface-level-gfs-0.25.json` | 2 m dew point, K (~6.2 MB) | 〃 | `dew` |
-| `current-ocean-currents-cmems-0.25.json` | u/v currents @ 0.494 m (~11.7 MB) | CMEMS via `refresh_ocean.py` | `currents` |
-| `current-ocean-currents-25m-cmems-0.25.json` | u/v currents @ 25.211 m (~11.7 MB) | 〃 | `currents25` |
-| `current-ocean-temp-cmems-0.25.json` | thetao, °C @ 0.494 m (~6.1 MB) | 〃 | `temperature` |
-| `current-ocean-waves-gfswave-0.25.json` | wave propagation u/v; magnitude = peak period (s) (~10.9 MB) | GFS-Wave via `refresh_waves.py` | — |
-| `current-ocean-wave-height-gfswave-0.25.json` | significant wave height, m (~5.1 MB) | 〃 (same download) | — |
+| File | Contents | Raw / wire | Source / script | Product arg |
+|---|---|---|---|---|
+| `current-wind-surface-level-gfs-0.25.json` | 10 m u/v wind | 8.9 / 1.6 MB | GFS via `refresh_wind.py` | `surface` |
+| `current-wind-1000hpa-gfs-0.25.json` | u/v @ 1000 hPa | 9.0 / 1.6 MB | 〃 | `1000hpa` |
+| `current-wind-500hpa-gfs-0.25.json` | u/v @ 500 hPa | 9.3 / 1.7 MB | 〃 | `500hpa` |
+| `current-wind-10hpa-gfs-0.25.json` | u/v @ 10 hPa | 9.6 / 1.5 MB | 〃 | `10hpa` |
+| `current-temp-surface-level-gfs-0.25.json` | 2 m temperature, K | 5.9 / 0.8 MB | 〃 | `temperature` |
+| `current-rh-surface-level-gfs-0.25.json` | 2 m relative humidity, % | 5.0 / 1.1 MB | 〃 | `rh` |
+| `current-dewpoint-surface-level-gfs-0.25.json` | 2 m dew point, K | 5.9 / 0.8 MB | 〃 | `dew` |
+| `current-ocean-currents-cmems-0.25.json` | u/v currents @ 0.494 m | 11.2 / 2.0 MB | CMEMS via `refresh_ocean.py` | `currents` |
+| `current-ocean-currents-25m-cmems-0.25.json` | u/v currents @ 25.211 m | 11.2 / 1.9 MB | 〃 | `currents25` |
+| `current-ocean-currents-110m-cmems-0.25.json` | u/v currents @ 109.729 m | 11.1 / 1.8 MB | 〃 | `currents110` |
+| `current-ocean-currents-450m-cmems-0.25.json` | u/v currents @ 453.938 m | 11.0 / 1.6 MB | 〃 | `currents450` |
+| `current-ocean-temp-cmems-0.25.json` | thetao, °C @ 0.494 m | 5.8 / 1.3 MB | 〃 | `temperature` |
+| `current-ocean-waves-gfswave-0.25.json` | wave propagation u/v; magnitude = peak period (s) | 10.4 / 1.7 MB | GFS-Wave via `refresh_waves.py` | — |
+| `current-ocean-wave-height-gfswave-0.25.json` | significant wave height, m | 4.9 / 0.5 MB | 〃 (same download) | — |
 
 Sources and how they are shaped:
 
@@ -354,9 +458,12 @@ Sources and how they are shaped:
   (uo/vo) and `cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m` (thetao), daily means read from the
   ARCO zarr store through the `copernicusmarine` toolbox and strided ×3 from 1/12° to ¼°
   (atmosphere-grid parity). Both datasets carry **50 depth levels** (0.494, 1.54, 2.65, 3.82,
-  5.08, 6.44, 7.93, 9.57, 11.4, 13.5, 15.8 … 25.2 … 55.8 … 109.7 … 453.9 … 1062 … 5727.9 m); the
-  shipped layers use 0.494 m and 25.211 m. A deeper layer needs only a new `PRODUCTS` entry with
-  a `depth` bracket plus a `LAYERS` entry. Land cells are `null`, which the engine renders as
+  5.08, 6.44, 7.93, 9.57, 11.4, 13.5, 15.8, 18.5, 21.6, 25.2, 29.4 … 92.3, 109.7, 130.7 … 380.2,
+  453.9, 541.1 … 1062 … 5727.9 m); the shipped layers use 0.494, 25.211, 109.729 and 453.938 m.
+  A deeper layer needs only a new `PRODUCTS` entry with a `depth` bracket plus a `LAYERS` entry —
+  but the bracket **must contain exactly one level**, because `fetch()` takes `isel(depth=0)` and
+  would otherwise ship the shallowest under the deeper one's name; `refresh_ocean.py` now raises
+  instead, naming the levels it caught. Land cells are `null`, which the engine renders as
   charcoal, so land stays uncolored and particle-free for free. Store facts worth keeping: time
   is hours since 1950-01-01; the store also holds ~8 forecast days, and the script deliberately
   takes the newest day ≤ the requested one; uo/vo are float32 m/s with no scale/offset;
@@ -381,20 +488,26 @@ the job at render time.
 
 set -a && source .env/copernicusmarine && set +a
 
-~/.venvs/aws/bin/python scripts/refresh_ocean.py              # all three CMEMS products, today UTC
+~/.venvs/aws/bin/python scripts/refresh_ocean.py              # all five CMEMS products, today UTC
 ~/.venvs/aws/bin/python scripts/refresh_ocean.py currents25   # one product
 ~/.venvs/aws/bin/python scripts/refresh_ocean.py currents <YYYY-MM-DD>  # one product, given day
 
 set -a && source .env/r2 && set +a
-./scripts/upload_data.sh                                   # push public/data/current-*.json to R2
+./scripts/upload_data.sh                                   # brotli + push current-*.json to R2
 ```
 
 `refresh_wind.py` and `refresh_waves.py` find the newest published cycle on NOMADS by walking
 back 6 h at a time from four hours ago (files appear ~3.5–5 h after the nominal cycle time),
 download only the needed fields, and overwrite the JSON in place; pass a local `.grib2` path to
-skip the download. `refresh_ocean.py` with no product argument refreshes all three CMEMS products
-and logs a per-product progress/summary report (dataset, dimensions, selected record and depth,
-ocean-vs-NaN cell counts, timings, output size).
+skip the download. `refresh_ocean.py` with no product argument refreshes all five CMEMS products
+(the loop reads `PRODUCTS`, so a new depth entry is picked up with no further edit) and logs a
+per-product progress/summary report (dataset, dimensions, selected record and depth, ocean-vs-NaN
+cell counts, timings, output size).
+
+**`upload_data.sh` uploads whatever is in `public/data/`, and the bucket is production.** A stale
+local file overwrites a fresher bucket object, so refresh the whole set before uploading rather
+than shipping a partial one — `refTime`, not `Last-Modified`, is the ground truth for which
+snapshot an object holds.
 
 The data on screen is a static snapshot: it only advances when a refresh script runs — unattended,
 that means the workflow below. The HUD's `Data:` line always shows the loaded snapshot's own
@@ -440,20 +553,27 @@ the next firing into a half-finished upload.
   slots. `refresh_ocean.py` now pins `start_datetime`/`end_datetime` to one day (proven
   bit-identical output on the full 1/12° grid) with a walk-back over earlier days as a safety
   net, and the workflow's CMEMS step runs only on the anchor slot, taking CMEMS traffic to
-  **~105 MB/day**. The cost: a failed anchor run leaves the ocean layers stale for 24 h — no
-  later slot picks them up — accepted for the simpler gate. The three ocean objects simply keep
-  their previous bytes on non-anchor slots, since `upload_data.sh` only globs files that exist on
-  the runner.
+  **~105 MB/day** (now ~175 MB/day across five ocean products). The cost: a failed anchor run
+  leaves the ocean layers stale for 24 h — no later slot picks them up — accepted for the simpler
+  gate. The five ocean objects simply keep their previous bytes on non-anchor slots, since
+  `upload_data.sh` only globs files that exist on the runner.
 - **Secrets** (repository scope, Actions): `COPERNICUSMARINE_SERVICE_USERNAME` /
   `_PASSWORD` for CMEMS, plus `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` for the
   upload. GFS and GFS-Wave are anonymous. Vercel gets none of these — the site is fully static.
 - **Failure shape:** the upload step runs last, so a CMEMS outage or login failure uploads
   *nothing* rather than shipping a half-refreshed set; the bucket keeps serving the previous
   snapshot and the site never breaks, it just ages.
-- **Runtime ~4 minutes** for a full 12-dataset run (measured 3m49s, 3m48s and 3m25s) — free,
-  since Actions minutes are unmetered on public repos. The CMEMS step was ~98 s of that; the
-  time-pinned open should take it to ~20 s (dominated by `open_dataset` metadata round-trips),
-  and the three non-anchor slots skip it entirely. `timeout-minutes: 20` is already generous.
+- **Runtime depends on the slot.** Measured on the scheduled runs of 2026-08-20/21, the three
+  GFS-only slots take **1m49s–2m4s**; the anchor additionally runs CMEMS, which the time-pinning
+  brought to ~20 s per product (measured locally: 90.9 s for all five, 14–21 s each), so the
+  anchor lands near **4 minutes**. Actions minutes are unmetered on public repos.
+  `timeout-minutes: 20` remains generous.
+- **Run history is trimmed by hand**, so it is not an audit trail. Old runs are deleted from the
+  Actions tab deliberately, keeping roughly the last three; on 2026-08-21 the API returned
+  `total_count: 3`, and the anchor run that had demonstrably refreshed the ocean objects was
+  already gone. Verify a refresh from **the bucket** instead — `refTime` for which cycle an object
+  holds, `Last-Modified` for when it was written. (`Last-Modified` alone never proves fresher
+  data: a re-upload of unchanged files advances it while `refTime` stands still.)
 
 ### Credentials
 
@@ -467,7 +587,6 @@ the next firing into a half-finished upload.
 - **R2**: `.env/r2` holds `R2_ACCOUNT_ID` and the S3-compatible key pair; the token is scoped to
   one bucket with Object Read & Write only.
 
-Never print or commit these; `.env/` is git-ignored.
 
 ### Gotchas learned the hard way
 
@@ -485,6 +604,12 @@ Never print or commit these; `.env/` is git-ignored.
   `10hpa`, `temperature`, `rh`, `dew` — copy them, don't retype them, into any refresh loop.
 - CMEMS's shallowest depth coordinate is 0.494025 m, so asking for `[0, 1]` works but warns; the
   script uses the interval `(0.494, 0.495)` instead.
+- A CMEMS **depth bracket must isolate exactly one level**. `fetch()` ends in `isel(depth=0)`, so a
+  wider bracket silently writes the shallowest level under the deeper level's filename — a file
+  that looks completely normal. `refresh_ocean.py` now raises with the levels it caught, and the
+  `Selected depth:` line is worth reading anyway.
+- `pkill -f "http.server 8421"` matches **its own command line** and kills the shell running it.
+  Use a recorded PID, or a pattern that cannot match the killer.
 - Dead ends already explored for ocean currents: NOMADS has no RTOFS filter, RTOFS 2ds is
   netCDF-only, NOMADS OPeNDAP is retired, OSCAR/jplOscar is stale. The working non-CMEMS fallback
   is NOAA CoastWatch ERDDAP `noaacwBLENDEDNRTcurrentsDaily` (0.25° blended geostrophic,
@@ -533,6 +658,17 @@ Each entry is root cause → fix, with how it was verified.
   `NO_DATA_GRAY` — the same charcoal as land — in both the full field and the drag preview.
 - **Wrap-around column missing on a ⅓° grid.** The grid-continuity test used `floor(ni × Δλ)`,
   and 1080 × ⅓ is 359.99… in floating point; `round` fixed it.
+- **Globe never rendered at the fitted scale.** `fitProjection()` read
+  `projection.scale() ? projection.scale() : initialScale`, and `d3.geoOrthographic()` ships a
+  non-zero default scale (**249.5**), so the guard's first branch always won: the globe drew at a
+  fixed 249.5 px radius on every display instead of `min(width, height) × 0.42`. It went unnoticed
+  because 249.5 is close to the fitted scale on a ~700 px-tall viewport, and because nothing ever
+  compared the two — until the hash write-back reported `zoom=0.84` on a fresh load, where boot
+  must be `1.00`. Exposed the second-order bug too: `#zoom=1` meant a *different* view than the one
+  the page booted with, so a written-back hash would not round-trip. `fitProjection()` is called
+  exactly once, from `init()`, so the scale is now assigned unconditionally. Verified headlessly:
+  249.5 / (707 × 0.42) = 0.84 before, `zoom=1.00` after, with on-globe overlay pixels rising
+  196,456 → 278,052 — a ratio of 1.415 against the predicted (296.94/249.5)² = 1.416.
 - **Stale data/engine after a refresh.** A plain browser reload still showed the old snapshot and
   old code: Chrome's normal reload only revalidates the HTML document, while `<script>` and
   `fetch()`ed JSON follow heuristic caching and were served from disk cache. Data fetches now use
@@ -563,36 +699,104 @@ Each entry is root cause → fix, with how it was verified.
 
 ## Next steps
 
-- **Watch a full 6-hourly day.** The dispatch path is proven by real runs, but the scheduled slots
-  under the anchor schedule are not, so the first day is worth checking against the bucket: all
-  four slots should advance the GFS/GFS-Wave `refTime` by one cycle each, and only the 06:45
-  anchor should touch the three ocean objects (their `Last-Modified` must hold still elsewhere).
-  Note also that GitHub disables cron in repos idle for 60 days (public repos get a warning email
-  first), and that the `REFRESH_CADENCE=daily` branch is untested — it drops cron strings rather
-  than running a gate, so verify a skipped slot logs nothing and consumes no runner before relying
-  on it.
-- **Bucket custom domain.** The r2.dev development URL is rate-limited by Cloudflare, documented as
-  not-for-production, and serves the weather JSONs **uncompressed** ([Data/code
-  split](#datacode-split)). A custom domain in front of the bucket buys Brotli/gzip and drops the
-  limit; switching is a one-line `R2_DATA_ROOT` change, and the old URL keeps working during the
-  transition.
-- **Depth-level ocean layers.** Both CMEMS datasets carry 50 levels; 15.8 m, 109.7 m and 453.9 m
-  are natural picks. One `PRODUCTS` entry (depth bracket) + one `LAYERS` entry + one menu button
-  each.
-- **Touch pinch-zoom** — only wheel zoom is implemented. The URL hash is read-only for the initial
-  view; writing it back on interaction, like the original, is still open.
-- **Small cleanups.** `LAYERS[].label` is documentation only — the HUD never reads it (the credit
-  line comes from `credit`/`DEFAULT_CREDIT`), so either wire it in or drop it. `.soon` and
-  `.layer:disabled` in `styles.css` are leftovers from the "Temperature soon" placeholder and no
-  longer match any markup. `#location`'s placeholder is hardcoded in `index.html` as "click a point
-  for wind speed", so every ocean and wave layer invites a click for wind speed until the first
-  click replaces it.
+- **`REFRESH_CADENCE=daily` is still untested.** It drops cron strings rather than running a gate,
+  so confirm a skipped slot logs nothing and consumes no runner before relying on it. Related:
+  GitHub disables cron in repos idle for 60 days (a warning email comes first) — the last push was
+  2026-08-21, so that clock runs out around **2026-10-20**.
+- **Verify the first CI run of the brotli upload.** The upload path is proven locally end to end
+  (all 14 objects re-served with `Content-Encoding: br`, byte-identical after decode), but the
+  runner installs `brotli` from apt and has never executed that step. The 06:45 UTC anchor is the
+  one that exercises all 14 files — and since run history is trimmed by hand, check it while it is
+  still in the Actions tab, or confirm from the bucket afterwards.
+- **Bucket custom domain.** No longer needed for compression — that is solved by pre-compressed
+  objects ([Compression](#compression-pre-compressed-objects-not-edge-compression)). What remains
+  is that r2.dev is rate-limited and documented as not-for-production, and that a custom domain
+  gives a hostname independent of the bucket id. Still a one-line `R2_DATA_ROOT` change, and the
+  old URL keeps working during the transition.
+- **More depth levels, if wanted.** The registry now scales cheaply: one `PRODUCTS` entry, one
+  `LAYERS` entry, one menu button. 15.8 m is the obvious remaining pick, though it sits close
+  enough to 25.211 m that the two may not read as different. Each level costs ~11 MB raw
+  (~1.8 MB on the wire) and ~20 s on the anchor slot.
+- **Favicon.** The only console noise left on every page load is a 404 for `/favicon.ico`.
+- **Hash reading is still boot-only.** Write-back is done; a `hashchange` listener that re-reads
+  the hash live would make hand-edited URLs work without a reload.
 - **Local venv is disposable.** `~/.venvs/aws` holds pygrib, numpy, copernicusmarine and the AWS
   CLI, and nothing depends on it surviving — the workflow builds its own on every run. Recreate with
   `python3 -m venv ~/.venvs/aws && ~/.venvs/aws/bin/pip install --upgrade pygrib numpy
   copernicusmarine awscli` (the system Python is PEP-668 managed, so a plain `pip3 install` fails).
+  Local uploads additionally need the `brotli` binary on `PATH`.
 
 ## Changes
+
+### 2026-08-21
+
+- **The globe opens on the visitor's country, with no permission prompt.** `init()` resolves the
+  browser's IANA timezone through a new generated table (`js/tz-centers.js`, 237 countries / 531
+  zones, from `scripts/gen_tz_centers.js`) and centers there; `#rotate=` still wins and an unknown
+  zone keeps the old 80°E 15°N. `Intl` is synchronous and offline, so the rotation is still assigned
+  before the first paint and nothing about the visitor leaves the browser — no prompt, no IP lookup,
+  no request. Country-grained by design, so the render cannot place a visitor more precisely than
+  their country. Mechanism, generator guards and known limits:
+  [Initial view: timezone lookup](#initial-view-timezone-lookup).
+  Verified headlessly over CDP by asserting the rotation the engine settled on via the hash
+  write-back — `Asia/Kolkata` → `-80.0,-23.0`, `Asia/Tokyo` → `-138.0,-37.0`, `America/New_York` →
+  `99.0,-40.0`, `Europe/Paris` → `-2.0,-47.0`, `Pacific/Auckland` → `-173.0,42.0`, `UTC` → the
+  fallback — plus screenshots, `#rotate=-128.5,-21.5&zoom=5` surviving a Paris timezone untouched,
+  and all 531 entries resolving to their own row.
+- **Compression solved without a custom domain — ~119 MB → ~20 MB on the wire.** The standing
+  diagnosis ("r2.dev does not compress, so Brotli needs a bucket custom domain") was half right:
+  r2.dev really never compresses on the fly, but R2 *serves* a `Content-Encoding` stored on the
+  object. `upload_data.sh` now brotli-compresses each file at `-q 9` and uploads the compressed
+  bytes with `--content-encoding br`, keeping the plain `.json` key — so **no URL changed and
+  `wind.js` was not touched**. Probed all three client cases against r2.dev first: br-capable
+  clients get 6.0× compressed bytes, and clients that send `gzip`-only or no `Accept-Encoding` get
+  correct raw bytes because Cloudflare decompresses at the edge. Verified after upload: all 14
+  objects return `Content-Encoding: br` and decode byte-identically to their local sources.
+  `-q 9` beat `gzip -9` (17.3 vs 18.9 MB on the 12-dataset corpus) at a third of the CPU; `-q 11`
+  cost ~7 s per file for another ~7% and was rejected.
+- **Two depth-level ocean layers** — `ocean110` (109.729 m) and `ocean450` (453.938 m), taking the
+  site to **13 layers / 14 datasets**. New `currents110` / `currents450` entries in `PRODUCTS`
+  (the all-products loop reads `PRODUCTS`, so nothing else needed editing), matching `LAYERS`
+  entries and menu buttons. 15.8 m was skipped as too close to the existing 25.211 m layer.
+  Verified headlessly: trail density falls monotonically with depth — 142k → 133k → 120k → 108k
+  animated pixels across surface / 25 m / 110 m / 450 m — which is the physics, not a scaling bug.
+- **Depth brackets are now guarded.** `fetch()` ends in `isel(depth=0)`, so a bracket catching two
+  levels would have silently shipped the shallower one under the deeper one's filename.
+  `refresh_ocean.py` raises instead, naming the levels caught; exercised with a deliberately wide
+  `(90, 140)` bracket, which reported `92.326, 109.729, 130.666`.
+- **Fixed: the globe never rendered at the fitted scale.** `d3.geoOrthographic()`'s non-zero default
+  (249.5) always won `fitProjection()`'s `projection.scale() ? … : initialScale` guard, so the globe
+  drew at a fixed 249.5 px radius on every display. Surfaced by the new hash write-back reporting
+  `zoom=0.84` at boot. Details under [Fixed bugs](#fixed-bugs).
+- **Touch pinch-zoom** — two-finger pinch scales by the ratio of finger spread to its value at
+  gesture start (absolute, so it cannot drift over a long gesture) through the same `clampScale()`
+  0.5×–8× limit the wheel uses. It runs beside `d3.drag`, whose filter now rejects multi-touch,
+  with a `pinching` flag held until every finger lifts so an already-running one-finger drag
+  neither rotates the globe mid-pinch nor fires a click readout at the end. `#display` gained
+  `touch-action: none`. Verified with synthetic touch events: 100 → 400 px spread gave exactly
+  `zoom=4.00`, and a 10× pinch-in clamped to `0.50`.
+- **URL hash write-back** — layer, center and zoom are written with `history.replaceState` from the
+  200 ms settle debounce, the one point every gesture converges on. A `#data=` override is carried
+  through verbatim, since `DATA_ROOT` resolved from it at load and dropping it would silently send
+  a reload back to R2. Verified round-trip: `#layer=sst&rotate=-30.0,20.0&zoom=2.00` in, the same
+  string out. Reading stays boot-only.
+- **Small cleanups closed out.** `LAYERS[].label` was dead — it now titles the document
+  (`earth · Wind @ Surface`), so tabs and bookmarks say which layer they hold. `#location`'s
+  placeholder is per-layer and resets on every switch (the old text was in the previous layer's
+  units); the markup's copy is a pre-JS fallback. `.soon` and `.layer:disabled` were deleted from
+  `styles.css` — no markup had matched them since the "Temperature soon" placeholder.
+- **Verified: the anchor schedule works as designed.** Across the 2026-08-20/21 slots, all three
+  GFS-only runs were green with `Refresh CMEMS ocean → skipped`, GFS `refTime` advanced one cycle
+  per slot, and the three ocean objects' `Last-Modified` held still at `2026-08-20 07:27` — with
+  the anchor landing ocean `refTime` `2026-08-20T00:00Z`, the day-0 nowcast the 06:45 move was
+  meant to catch. One correction fell out: GFS-only slots run **~2 min**, not the documented
+  ~4 min, because CMEMS is skipped. The anchor run itself was no longer in the API and had to be
+  confirmed from the bucket — first read as a short log-retention window, actually just old runs
+  being deleted from the Actions tab by hand, which is why the bucket is the audit trail.
+- **All 13 layers re-verified headlessly** over CDP against a fresh 2026-08-21 00z cycle: clean
+  overlay and animation, empty `#status`, no failed fetches beyond the missing favicon. The live
+  site was re-checked against the now-compressed bucket **before** any code shipped, confirming the
+  compression change is backward-compatible with the deployed engine.
 
 ### 2026-08-18
 
@@ -640,7 +844,7 @@ Each entry is root cause → fix, with how it was verified.
 
 - **Deployed to Vercel**, production at `globe-climatesim.vercel.app` — imported as a static project
   with no build step, since `vercel.json` supplies `outputDirectory: public`. Verified in production:
-  all **11 layers** render headlessly; static assets come from Vercel with the intended cache headers
+  all 11 layers render headlessly; static assets come from Vercel with the intended cache headers
   and `content-encoding: br`; `data/current-*.json` 404s on the Vercel origin, which proves the
   rendered fields came from R2; the HUD reports the loaded snapshot with an empty `#status`.
 - **Refresh workflow added** (`.github/workflows/refresh-data.yml`) and the five Actions secrets
@@ -665,7 +869,7 @@ Each entry is root cause → fix, with how it was verified.
   the run produced no commit, no force-push and no Vercel deploy, as designed.
 - **Runner actions bumped** `actions/checkout@v4` → `@v7` and `actions/setup-python@v5` → `@v7`
   (both `node24`), and `timeout-minutes` 45 → 20 now that the real runtime is known. Confirmed by a
-  second dispatch: same 14 steps green in 3m48s with **no annotations**, against the Node 20
+  second dispatch: same 14 steps green in 3m48s with no annotations, against the Node 20
   deprecation warning the v4/v5 run carried — so the scheduled path runs a tested configuration.
 
 ### 2026-08-16
@@ -689,11 +893,11 @@ Each entry is root cause → fix, with how it was verified.
 
 - **Cloudflare R2 live**: bucket `earth-data` created, r2.dev public URL enabled, CORS policy set,
   an Object Read & Write API token created and written to the git-ignored `.env/r2`, AWS CLI
-  installed locally. All 12 datasets uploaded, and the **overwrite path verified** — a full local
+  installed locally. All 12 datasets uploaded, and the overwrite path verified — a full local
   refresh followed by re-upload advanced `Last-Modified` and the served `refTime`.
 - **`R2_DATA_ROOT` set** in `wind.js` to the live r2.dev base URL (was a placeholder), so a
   non-localhost page now fetches all 12 weather files from the bucket.
-- **All datasets refreshed** to one cycle: GFS and GFS-Wave 06:00 UTC, CMEMS daily mean of the
+- All datasets refreshed to one cycle: GFS and GFS-Wave 06:00 UTC, CMEMS daily mean of the
   same day.
 
 ### 2026-07-12
@@ -762,17 +966,9 @@ Ocean layers, the data/code split, and the tuning rounds that followed.
   `scripts/upload_data.sh` (S3 API via AWS CLI, cache-control 1800 s). Refreshes now cause zero
   commits, force-pushes or redeploys. Verified headlessly on both paths, the remote one against a
   CORS-enabled stand-in bucket on a second origin.
-- **Refresh cadence: daily by default** (was 6-hourly, all datasets): the workflow keeps a
-  6-hourly cron, but a gate job only lets the ~00:45 UTC firing through unless the repo variable
-  `REFRESH_CADENCE=6h` is set — a settings-page toggle, no workflow edit.
 - **Quality pass over `wind.js`**: an `OCEAN_ALPHA` constant replaced the repeated
   `Math.floor(0.58 * 255)`; the wave-particle comment block was rewritten to describe final
   behavior rather than accreted history. A dead-code audit found nothing unreferenced.
-- **History rewritten with `git filter-repo`** to drop pre-split data blobs from all commits:
-  `.git` 49 MB → 1.9 MB, one pure data-refresh commit pruned as empty. Force-pushed; all hashes
-  changed.
-- **Deployment runbook written** (outside the repo on purpose) and then rewritten around R2:
-  bucket setup, public URL + CORS, five Actions secrets, upload workflow, repo-size strategy.
 
 ### 2026-07-10
 

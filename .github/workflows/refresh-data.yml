@@ -35,7 +35,7 @@ jobs:
       - name: Install GRIB + CMEMS tooling
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q libeccodes-dev   # pygrib's GRIB decoder backend
+          sudo apt-get install -y -q libeccodes-dev brotli   # GRIB decoder backend; brotli for the upload
           pip install pygrib numpy copernicusmarine
       - name: Refresh GFS atmosphere (anonymous)
         run: |
@@ -47,14 +47,16 @@ jobs:
       - name: Refresh CMEMS ocean (credentials)
         # The CMEMS products are P1D-m daily means published once per day, so
         # only the anchor slot fetches them — the other slots would re-download
-        # an identical field. Skipping this step just leaves the 3 ocean JSONs
-        # unwritten, so the upload glob ships 9 files and the bucket keeps the
-        # previous ocean objects.
+        # an identical field. Skipping this step just leaves the 5 ocean JSONs
+        # unwritten, so the upload glob ships 9 files instead of 14 and the
+        # bucket keeps the previous ocean objects.
         if: github.event_name != 'schedule' || github.event.schedule == '45 6 * * *'
         env:
           COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
           COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
         run: python scripts/refresh_ocean.py
+      # Objects ship pre-compressed (Content-Encoding: br) because r2.dev never
+      # compresses on the fly; see scripts/upload_data.sh.
       - name: Upload to R2
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}

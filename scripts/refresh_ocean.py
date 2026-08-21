@@ -8,6 +8,9 @@ Products (see PRODUCTS):
     currents      uo/vo currents at 0.494 m (surface), two-record u/v file
     currents25    uo/vo currents at 25.211 m — near the mixed-layer base, where
                   the flow starts diverging from the wind-driven surface drift
+    currents110   uo/vo currents at 109.729 m — below the seasonal thermocline
+    currents450   uo/vo currents at 453.938 m — intermediate water, essentially
+                  no wind-driven signal left
     temperature   thetao sea water potential temperature (°C), single record
 
 Uses the official Copernicus Marine Toolbox, which needs credentials: locally
@@ -77,6 +80,14 @@ import numpy as np
 # the real surface depth without exceeding the dataset bounds.
 SURFACE_DEPTH = (0.494, 0.495)
 
+# A depth bracket MUST contain exactly one of the store's 50 levels. fetch()
+# below takes isel(depth=0), so a bracket catching two levels would silently
+# ship the shallower one under the deeper one's name; check_single_depth()
+# turns that into a hard error. The levels near the shipped layers are:
+#
+#     … 21.599, 25.211, 29.445 …   92.326, 109.729, 130.666 …
+#                                 380.213, 453.938, 541.089 …
+
 
 # ---------------------------------------------------------------------------
 # GRIB parameter identities
@@ -117,6 +128,20 @@ PRODUCTS = {
         "variables": ["uo", "vo"],
         "depth": (23, 27),  # only the 25.211 m level
         "out": "current-ocean-currents-25m-cmems-0.25.json",
+        "params": CURRENT_PARAMS,
+    },
+    "currents110": {
+        "dataset_id": "cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m",
+        "variables": ["uo", "vo"],
+        "depth": (100, 120),  # only the 109.729 m level
+        "out": "current-ocean-currents-110m-cmems-0.25.json",
+        "params": CURRENT_PARAMS,
+    },
+    "currents450": {
+        "dataset_id": "cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m",
+        "variables": ["uo", "vo"],
+        "depth": (420, 490),  # only the 453.938 m level
+        "out": "current-ocean-currents-450m-cmems-0.25.json",
         "params": CURRENT_PARAMS,
     },
     "temperature": {
@@ -351,6 +376,18 @@ def fetch(product, day):
     print()
 
     when = ds.time.values[0]
+    # isel(depth=0) takes the shallowest level in the bracket, so a bracket that
+    # caught more than one would quietly write the wrong depth under the right
+    # filename. Fail loudly instead — see the note beside SURFACE_DEPTH.
+    n_depth = int(ds.sizes.get("depth", 0))
+    if n_depth != 1:
+        raise RuntimeError(
+            "depth bracket %.3f-%.3f m selected %d levels (%s); it must select "
+            "exactly one" % (
+                product["depth"][0], product["depth"][1], n_depth,
+                ", ".join("%.3f" % v for v in np.atleast_1d(ds.depth.values)),
+            )
+        )
     sel = ds.isel(time=0, depth=0)
     selected_depth = float(sel.depth.values)
 
