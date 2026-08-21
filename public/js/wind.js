@@ -366,11 +366,23 @@
     var animCtx = animCanvas.getContext("2d");
     var mesh = null;  // coastline/lake geometry, set after topology loads
 
+    // Overlay backing-store pixels per CSS pixel. The data layers stay at 1: the overlay is
+    // written with putImageData, which ignores the transform, and their color field is smooth
+    // enough that the browser's upscale costs nothing visible. A renderer plug-in may ask for
+    // more (js/sunlight.js does — an upscaled photograph is visibly soft on a HiDPI screen).
+    var overlayScale = 1;
+
+    function sizeOverlayCanvas() {
+        overlayCanvas.width = Math.round(view.width * overlayScale);
+        overlayCanvas.height = Math.round(view.height * overlayScale);
+        overlayCanvas.style.width = view.width + "px";
+        overlayCanvas.style.height = view.height + "px";
+    }
+
     function sizeCanvases() {
         var dpr = window.devicePixelRatio || 1;
         // Map and animation render at device resolution for crisp lines; particle math stays
-        // in CSS px via the transform. The overlay must remain at CSS resolution — it is
-        // written with putImageData, which ignores the transform.
+        // in CSS px via the transform.
         [mapCanvas, linesCanvas, animCanvas].forEach(function (c) {
             c.width = view.width * dpr;
             c.height = view.height * dpr;
@@ -379,10 +391,7 @@
             c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
         });
 
-        overlayCanvas.width = view.width;
-        overlayCanvas.height = view.height;
-        overlayCanvas.style.width = view.width + "px";
-        overlayCanvas.style.height = view.height + "px";
+        sizeOverlayCanvas();
     }
 
     // Two layers of line work: sphere fill + graticule live on #map, *below* the color
@@ -408,12 +417,20 @@
         path({type: "Sphere"});
         ctx.fillStyle = "#101018";
         ctx.fill();
-        strokeOn(ctx, path, {type: "Sphere"}, 0.25, 1.2);
-        strokeOn(ctx, path, d3.geoGraticule10(), 0.12, 0.75);
+        if (!activeRenderer) {
+            strokeOn(ctx, path, {type: "Sphere"}, 0.25, 1.2);
+            strokeOn(ctx, path, d3.geoGraticule10(), 0.12, 0.75);
+        }
 
         var lctx = linesCanvas.getContext("2d");
         var lpath = d3.geoPath(projection, lctx);
         lctx.clearRect(0, 0, view.width, view.height);
+        // A renderer layer gets no vector work from the engine: what belongs over its
+        // pixels is its own call, so #lines is handed to it whole.
+        if (activeRenderer) {
+            activeRenderer.decorate(lctx);
+            return;
+        }
         if (landFill) {
             // Ocean layers: charcoal land painted *above* the overlay (nullschool's look).
             // The crisp vector edge also crops the ⅓°-grid staircase where sea color
@@ -593,6 +610,7 @@
      * The full-resolution recompute's putImageData replaces this wholesale when it finishes.
      */
     function drawOverlayPreview() {
+        if (activeRenderer) return activeRenderer.preview();
         if (!grid) return;
         var step = OVERLAY_PREVIEW_STEP;
         var w = Math.ceil(view.width / step), h = Math.ceil(view.height / step);
@@ -797,6 +815,11 @@
     function drawScaleBar() {
         var canvas = document.getElementById("scale");
         var ctx = canvas.getContext("2d");
+        if (activeRenderer) {
+            document.getElementById("scale-label").innerHTML =
+                activeRenderer.scaleBar(ctx, canvas.width, canvas.height);
+            return;
+        }
         for (var i = 0; i < canvas.width; i++) {
             var t = i / (canvas.width - 1);
             var rgb = overlaySpec ? overlaySpec.lut[Math.round(t * 255)] : windOverlayColor(t * 100, 255);
@@ -815,6 +838,11 @@
     function showLocation(point, grid) {
         var coord = projection.invert(point);
         if (!coord || !isFinite(coord[0]) || !isFinite(coord[1])) return;
+        if (activeRenderer) {
+            setLocation(activeRenderer.readout(coord[0], coord[1]) + " @ " +
+                formatCoordinates(coord[0], coord[1]));
+            return;
+        }
         var parts = [];
         if (overlaySpec && scalarGrid) {
             var v = scalarGrid.interpolate(coord[0], coord[1]);
@@ -1003,6 +1031,52 @@
                 format: function (v) { return v.toFixed(1) + " m"; }
             }}
     };
+
+    // ------------------------------------------------------------------------------------------------
+    // Renderer plug-ins
+    //
+    // A script loaded before this one may register a renderer on window.EarthRenderers; its
+    // layers join LAYERS and, while one of them is displayed, it owns the overlay canvas
+    // instead of the grid → field → particles pipeline. The split is state vs pixels: the
+    // engine keeps everything that holds a render onto the globe (the projection instance,
+    // the four canvases, drag/wheel/pinch, the cancel token, the recompute debounce, the URL
+    // hash, the HUD), and a renderer only draws. The alternative — a second script owning its
+    // own projection and interaction — means two copies of the view state to keep in sync on
+    // every drag frame. js/sunlight.js is the first plug-in; see its header for the contract:
+    //
+    //   register(engine, dataRoot) → layers    latch the context, return layers to register
+    //   overlayScale()                         backing-store px per CSS px it wants
+    //   tick                                   ms between automatic re-renders, 0 for static
+    //   load(layer) → Promise                  fetch/decode, resolved when ready to draw
+    //   beginFrame()                           latch per-frame state before the engine draws
+    //   render(cancel)                         paint the overlay, yielding on the token
+    //   preview()                              cheap repaint per drag frame
+    //   decorate(ctx)                          draw on #lines, above the overlay
+    //   scaleBar(ctx, w, h) → label            paint the legend, return its caption
+    //   readout(λ, φ) → text                   the click readout, minus the coordinates
+    var ENGINE = {
+        projection: projection,
+        overlay: overlayCanvas,
+        overlayCtx: overlayCtx,
+        view: function () { return view; },
+        bounds: globeBounds,
+        overlayScale: function () { return overlayScale; },
+        setStatus: setStatus,
+        setDate: function (text) { document.getElementById("data-date").textContent = text; },
+        isMobile: isMobile,
+        maxTaskTime: MAX_TASK_TIME,
+        minSleepTime: MIN_SLEEP_TIME
+    };
+
+    Object.keys(window.EarthRenderers || {}).forEach(function (name) {
+        var renderer = window.EarthRenderers[name];
+        var layers = renderer.register(ENGINE, DATA_ROOT);
+        Object.keys(layers).forEach(function (id) {
+            layers[id].renderer = renderer;   // how loadLayer knows to hand the layer over
+            LAYERS[id] = layers[id];
+        });
+    });
+
     var DEFAULT_LAYER = "surface";
     var DEFAULT_CREDIT = "GFS 0.25&deg; &nbsp;|&nbsp; NCEP / US National Weather Service";
     var DEFAULT_PARTICLES = {velocityScale: VELOCITY_SCALE, maxIntensity: MAX_INTENSITY};
@@ -1018,6 +1092,8 @@
     var landFill = false;     // charcoal land above the overlay (ocean layers)
     var flowFormat = KMH;     // click-readout format for the particle flow's speed
     var currentLayerId = null;  // active layer id — the hash write-back's source of truth
+    var activeRenderer = null;  // renderer plug-in owning the overlay, or null for the data layers
+    var rendererTimer = null;   // its periodic re-render, if it asked for one
 
     function cancelWork() {
         currentCancel.requested = true;
@@ -1071,6 +1147,13 @@
     }
 
     function recompute() {
+        if (activeRenderer) {
+            var rendererCancel = cancelWork();
+            activeRenderer.beginFrame();   // before drawMap: its decoration shares the frame's state
+            drawMap(false);
+            activeRenderer.render(rendererCancel);
+            return;
+        }
         if (!grid) return;
         var cancel = cancelWork();
         drawMap(false);
@@ -1082,8 +1165,8 @@
     }
 
     /**
-     * Fetch a layer's wind dataset and restart the pipeline on it. The map topology is
-     * loaded once in init(); switching layers only swaps the grid.
+     * Fetch a layer's dataset — or hand it to its renderer plug-in — and restart the pipeline
+     * on it. The map topology is loaded once in init(); switching layers only swaps the data.
      */
     function loadLayer(id) {
         var layer = LAYERS[id];
@@ -1091,7 +1174,17 @@
         currentLayerId = id;
         cancelWork();
         clearTimeout(recomputeTimer);
+        clearInterval(rendererTimer);
         clearCanvas(animCanvas);
+        activeRenderer = layer.renderer || null;
+        // Every render path writes a full-canvas putImageData, so the outgoing layer's
+        // overlay is replaced wholesale rather than cleared — it stays on screen while the
+        // next one loads, which is how switching between the data layers has always looked.
+        var wanted = activeRenderer ? activeRenderer.overlayScale() : 1;
+        if (wanted !== overlayScale) {
+            overlayScale = wanted;
+            sizeOverlayCanvas();
+        }
         document.querySelectorAll(".layer[data-layer]").forEach(function (b) {
             b.classList.toggle("active", b.dataset.layer === id);
         });
@@ -1114,6 +1207,23 @@
         setLocation(layer.placeholder || DEFAULT_PLACEHOLDER);
         writeHash();
         setStatus("downloading data…");
+
+        // A renderer layer has no grids: it loads whatever it draws from, then owns the frame.
+        if (activeRenderer) {
+            grid = scalarGrid = overlaySpec = null;
+            landFill = false;
+            activeRenderer.load(layer).then(function () {
+                drawScaleBar();
+                document.getElementById("data-label").innerHTML = layer.credit || DEFAULT_CREDIT;
+                recompute();
+                if (activeRenderer.tick) rendererTimer = setInterval(recompute, activeRenderer.tick);
+            }).catch(function (err) {
+                console.error(err);
+                setStatus("error: " + err.message);
+            });
+            return;
+        }
+
         var fetches = [fetch(layer.file, {cache: "no-cache"}).then(function (r) {
             if (!r.ok) throw new Error("wind data: HTTP " + r.status);
             return r.json();
@@ -1192,7 +1302,7 @@
                 if (moved) {
                     scheduleRecompute();
                 }
-                else if (grid) {
+                else if (grid || activeRenderer) {
                     showLocation([event.x, event.y], grid);
                 }
             });

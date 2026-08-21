@@ -31,18 +31,21 @@ build step, no framework. The core algorithms are ported from
 Any static server works — `start.sh` is just
 `python3 -m http.server 8420 -d public` plus an `xdg-open`.
 
-The fourteen weather datasets are **not in the git repo** ([Data](#data)). For a working local page,
-either refresh them into `public/data/` (see [Refreshing the data](#refreshing-the-data)) or
-borrow the deployed bucket with the `#data=` hash below.
+Neither the fourteen weather datasets nor the RealView imagery is **in the git repo**
+([Data](#data)). For a working local page, either populate `public/data/` — the weather JSONs via
+[Refreshing the data](#refreshing-the-data), the imagery via a one-off `./scripts/fetch_textures.sh`
+— or borrow the deployed bucket with the `#data=` hash below. The two are independent: without the
+JSONs the Atmosphere and Ocean layers fail, without the imagery the RealView layers do.
 
 All URL-hash options are read once at load and can be combined with `&`:
 
 | Hash | Meaning |
 |---|---|
-| `#layer=<id>` | initial layer: `surface`, `1000hpa`, `500hpa`, `10hpa`, `temperature`, `rh`, `dew`, `ocean`, `ocean25`, `ocean110`, `ocean450`, `sst`, `waves` |
+| `#layer=<id>` | initial layer: `surface`, `1000hpa`, `500hpa`, `10hpa`, `temperature`, `rh`, `dew`, `ocean`, `ocean25`, `ocean110`, `ocean450`, `sst`, `waves`, `daylight`, `nightlights`, `relief` |
 | `#rotate=λ,φ` | initial center, e.g. `#rotate=-128.5,-21.5` (φ clamped to ±90°) |
 | `#zoom=k` | initial zoom, 0.5–8× the fitted scale |
-| `#data=<url>` | fetch the weather JSONs from this base URL instead of local files / R2 |
+| `#data=<url>` | fetch the weather JSONs *and the RealView imagery* from this base URL instead of local files / R2 |
+| `#relief=k` | relief depth for the Relief layer, 0–1 (default 0.02). Read once at boot; `EarthRenderers.sunlight.setRelief(k)` in the console changes it live |
 
 Without `#rotate=`, the globe opens centered on the visitor's country, inferred from the browser's
 timezone with no permission prompt and no network request — see
@@ -57,8 +60,8 @@ hand needs a reload to take effect.
 `#layer=` and `#rotate=`/`#zoom=` are also the headless-testing hooks: the burger menu needs a
 real click, and a specific view can otherwise only be reached by dragging.
 
-After editing `wind.js` or `menu.js`, reload hard (Ctrl+Shift+R) — there is no cache-busting on
-the script tags. Data fetches use `{cache: "no-cache"}`, so refreshed datasets appear on a plain
+After editing `wind.js`, `sunlight.js` or `menu.js`, reload hard (Ctrl+Shift+R) — there is no
+cache-busting on the script tags. Data fetches use `{cache: "no-cache"}`, so refreshed datasets appear on a plain
 reload.
 
 Deployment: live at **[globe-climatesim.vercel.app](https://globe-climatesim.vercel.app)**. Vercel
@@ -82,21 +85,29 @@ hours without touching git ([Automated refresh](#automated-refresh)).
 │   ├── refresh_ocean.py         # CMEMS currents + thetao via copernicusmarine (credentialed)
 │   ├── refresh_waves.py         # GFS-Wave (WAVEWATCH III) height/period/direction (anonymous)
 │   ├── upload_data.sh           # brotli-compresses public/data/current-*.json into the R2 bucket
+│   ├── fetch_textures.sh        # ONE-OFF: downloads the NASA imagery the RealView layers use
+│   ├── upload_textures.sh       # ONE-OFF: ships that imagery to R2 (never in the refresh loop)
 │   └── gen_tz_centers.js        # regenerates public/js/tz-centers.js from tzdata + countries-50m
 └── public/                      # the deployable site (code + static assets only)
     ├── index.html               # four stacked canvases (#map, #overlay, #animation, #lines) + HUD
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
-    ├── js/wind.js               # the whole engine (~1220 lines, one IIFE)
+    ├── js/wind.js               # the whole engine (~1480 lines, one IIFE)
+    ├── js/sunlight.js           # renderer plug-in: the RealView layers (~730 lines)
     ├── js/menu.js               # burger toggle, tab switching, layerchange dispatch (~40 lines)
     ├── js/tz-centers.js         # GENERATED: timezone → country centroid, for the initial view
     ├── libs/
     │   ├── d3.v7.min.js         # vendored D3 v7 (includes d3-scale-chromatic)
+    │   ├── suncalc.js           # vendored SunCalc v1.9.0 UMD (BSD-2-Clause), unmodified
     │   └── topojson-client.min.js
     └── data/
         ├── current-*.json       # the 14 weather datasets — GIT-IGNORED (data/code split):
         │                        #   refresh scripts write them here for local dev,
         │                        #   upload_data.sh ships them to Cloudflare R2 for production,
         │                        #   wind.js picks local vs R2 by hostname (see Data)
+        ├── bluemarble-*.jpg     # 12 monthly Blue Marble NG composites — GIT-IGNORED, static:
+        │                        #   fetch_textures.sh writes them, upload_textures.sh ships them
+        ├── blackmarble-*.jpg    # VIIRS night lights — GIT-IGNORED, same lifecycle
+        ├── elevation-gebco-*.png  # GEBCO elevation, for Relief — GIT-IGNORED, ditto
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m) — in git
         ├── countries-50m.json   # world-atlas@2 countries topology (borders + land, idle detail)
         └── countries-110m.json  # world-atlas@2 countries topology (borders + land, while dragging)
@@ -187,6 +198,10 @@ credit/date lines, `landFill`, the click-readout format, the readout's idle `pla
 `label` that titles the document. `index.html`'s menu buttons carry
 matching `data-layer` ids. One layer is displayed at a time; layers are never combined.
 
+The last two rows are **renderer layers**: they carry a `renderer` reference instead of a flow
+file, and none of the grid → field → particles machinery runs for them. See
+[Renderer plug-ins](#renderer-plug-ins).
+
 | Layer id | Menu button | Particles from | Overlay | Scale |
 |---|---|---|---|---|
 | `surface` | Atmosphere → Wind @ Surface | GFS 10 m u/v | wind speed, pastelized sinebow | 0 – 360 km/h |
@@ -202,6 +217,9 @@ matching `data-layer` ids. One layer is displayed at a time; layers are never co
 | `ocean450` | Ocean → Current-450m | CMEMS uo/vo @ 453.938 m | 〃 | 〃 |
 | `sst` | Ocean → Temperature | CMEMS surface currents | CMEMS thetao through `bwr` | 0 – 35 °C |
 | `waves` | Ocean → Waves | GFS-Wave propagation u/v (magnitude = peak period) | significant wave height, blue → saffron | 0 – 15 m |
+| `daylight` | RealView → Daylight | *none — renderer layer* | Blue Marble NG, shaded by sun elevation | night – day |
+| `nightlights` | RealView → Night Lights | 〃 | 〃 plus VIIRS city lights | 〃 |
+| `relief` | RealView → Relief | 〃 | 〃 plus GEBCO terrain shading | 〃 |
 
 Colormaps come from the vendored D3 bundle's `d3-scale-chromatic` (`colormapLut()` samples an
 interpolator into a 256-entry LUT), except `bwr` — a hand-rolled two-segment ramp — and the
@@ -210,6 +228,126 @@ domain pin to the end colors because the LUT index is clamped. `buildGrid()` is 
 (records are picked by parameter category/number only), and both the streak guard and the color
 scales are data-driven, so the much faster jet-stream (500 hPa) and polar-night-jet (10 hPa)
 winds need no per-level tuning.
+
+### Renderer plug-ins
+
+Not every layer is weather. A script loaded *before* `wind.js` may register a renderer on
+`window.EarthRenderers`; its layers join `LAYERS` at boot, and while one of them is displayed the
+renderer owns the overlay canvas instead of the grid → field → particles pipeline.
+`public/js/sunlight.js` is the first plug-in, supplying all three RealView layers.
+
+The split is **state versus pixels**. The engine keeps everything that holds a render onto the
+globe — the projection instance, the four canvases, drag/wheel/pinch, the cancel token, the
+recompute debounce, the URL hash and the HUD — and hands the renderer a small context object; the
+renderer only draws. The alternative, a second script owning its own projection and interaction,
+means two copies of the view state to keep in sync on every drag frame.
+
+| Contract member | Purpose |
+|---|---|
+| `register(engine, dataRoot)` → layers | latch the context, return layers to merge into `LAYERS` |
+| `overlayScale()` | backing-store px per CSS px the overlay should use |
+| `tick` | ms between automatic re-renders, 0 for a static layer |
+| `load(layer)` → Promise | fetch/decode, resolved when ready to draw |
+| `beginFrame()` | latch per-frame state before the engine draws |
+| `render(cancel)` | paint the overlay, yielding on the engine's cancel token |
+| `preview()` | cheap repaint per drag frame |
+| `decorate(ctx)` | draw on `#lines`, above the overlay |
+| `scaleBar(ctx, w, h)` → label | paint the legend, return its caption |
+| `readout(λ, φ)` → text | the click readout, minus the coordinates |
+
+Two engine concessions exist for this. `overlayScale` — the data layers stay at 1, since
+`putImageData` ignores the transform and their colour field is smooth enough that the browser's
+upscale costs nothing visible, whereas an upscaled photograph is visibly soft on a HiDPI screen.
+And `drawMap()` hands `#lines` to the renderer whole instead of drawing the sphere stroke,
+graticule and coastlines: a white coastline over a photograph of the same coastline is a double
+outline, and the graticule reads as a cage around a view from space.
+
+### The RealView layers
+
+RealView is the photographic domain: the Earth's surface rendered as imagery rather than as a
+field over a wireframe, which is what the weather layers do. The tab names the domain, not the
+plug-in that currently fills it, so further imagery layers can join it without being sun-lit.
+`sunlight.js` supplies the first three, projecting NASA imagery and shading it by where the sun
+actually is at this moment.
+
+| Layer | What it adds to the Blue Marble |
+|---|---|
+| **Daylight** | nothing but the sun — the imagery as photographed |
+| **Night Lights** | VIIRS city lights on the dark side |
+| **Relief** | terrain shading from an elevation map |
+
+Relief is a layer rather than a treatment applied to the other two on purpose: Daylight and Night
+Lights are the imagery as the satellite recorded it, and shading the camera never saw is something
+a viewer should switch on deliberately. All three share one Blue Marble URL, so moving between
+them decodes nothing.
+
+- **Imagery.** Blue Marble: Next Generation (MODIS/Terra, 2004), the 8 km composite, one image per
+  month — the layer picks the current month and gets the season's snow line and vegetation for
+  free. The `world.topo` variant is deliberate over `world.topo.bathy`: without bathymetric relief
+  the oceans stay near-black. Night Lights adds Black Marble 2016 (VIIRS/Suomi NPP). Both are NASA
+  Earth Observatory imagery, free of copyright. Each texture decodes once per URL into a bilinear
+  sampler and is cached, so switching between the two layers never re-decodes.
+- **Solar geometry** comes from SunCalc, so no astronomy is reimplemented. `subsolar()` reads both
+  numbers out of a single `getPosition()` call at the north pole: there `cos φ = 0` kills the
+  declination term of SunCalc's azimuth (which it measures from south), leaving the sun's
+  Greenwich hour angle, while a pole observer's altitude *is* the declination. Verified against
+  SunCalc itself — `getPosition()` at the returned point reports altitude 90.0000° — and against
+  the physics: ±23.44° at the solstices, ~0° at the equinox, −15°/hour.
+- **Shading.** `lit` is the cosine of the solar zenith angle, so the ±sin(6°) band around zero is
+  civil twilight: brightness smoothsteps across it, tinted warm mid-band and cool on the night
+  side, instead of cutting the globe with a hard edge. The night side is the imagery through
+  `NIGHT_CURVE`, and is **identical in both layers** — see [Tuning notes](#tuning-notes).
+- **The limb glow** on `#lines`: a radial gradient supplies the rim, then a linear gradient masks
+  it back to the sunlit side with `destination-in`. That mask is exact rather than a fudge — at
+  the limb the surface normal has no depth component, so the day/night boundary meets the rim
+  precisely on the line through the globe's centre perpendicular to the sun's projected direction.
+- **The HUD** shows `Sun position: <UTC>` as the date line and `night – day` as the scale label,
+  the bar itself painted by running sun elevations −12°…+12° through the same `shade()` the pixels
+  went through. The click readout gives sun elevation and local solar time.
+- **Relief** shades terrain by tilting the surface normal with the local slope of an elevation
+  map, then re-taking the sun dot product. Three things make it behave:
+  - **The gradient is precomputed at load, not per frame.** `buildRelief()` runs a separable
+    5-tap Sobel over the elevation map once and keeps ∂h/∂x and ∂h/∂y as `Int16Array`s; a frame
+    then costs one extra bilinear sample per pixel. The wide stencil is deliberate — the source
+    is 8-bit, ~26 m per code level, and adjacent differences over gentle ground return runs of
+    zero broken by single-level steps, which shade as terracing across plains.
+  - **It is trigonometry-free.** Everything needed is a dot product, and dot products survive
+    rotation, so the local east/north frame comes from the view-space sphere normal `n` plus two
+    per-frame constants — the north pole `N` and the sun `s`. With `c = n·N` (which is
+    sin(latitude), so `1/√(1-c²)` is the 1/cos(latitude) that longitude convergence needs):
+    `n̂·s = (N·s - c·(n·s))·w` and `ê·s = (n·(s×N))·w`. One sqrt and a handful of multiplies.
+  - **It multiplies the daylight term, and never touches the terminator.** Relief is applied as a
+    factor around 1, clamped to ±`RELIEF_CLAMP`, on the lit part of the shading only. Feeding the
+    tilted dot product back into `lit` instead is the tempting shortcut and does not work: the
+    twilight ramp spans only ±sin(6°) = ±0.1045, while a typical range perturbs the dot product
+    by several times that, so slopes cross the terminator and render as *night* — earthshine
+    tint and all — in the middle of a sunlit continent. The planet's geometry owns the day/night
+    boundary; relief modulates brightness inside it.
+
+  The strength tapers with the local sun elevation below `RELIEF_SUN_REF`. The normalisation that
+  holds average brightness constant amplifies contrast 2.8× at 12° against 35°, and there is no
+  cast-shadow term here — computing one means marching the sun ray through the elevation map per
+  pixel per frame — so grazing light would otherwise read as harsh noise rather than terrain.
+
+  `RELIEF_STRENGTH` is effectively a vertical exaggeration. At ~25.9 m per code level and 29.7 km
+  per texel, one code level per texel is a true slope of 0.05°, and the default 0.02 renders it as
+  1.15° — **≈23×**, falling to ≈8× at a 12° sun through the taper. Some exaggeration is
+  unavoidable: Everest is 8.8 km on a 6371 km radius, so true-scale relief on a globe is invisible.
+- **`tick` is 60 s**: the sun moves 0.25°/min, ≈1.3 px at the fitted scale.
+
+| Constant (`sunlight.js`) | Value | Meaning |
+|---|---|---|
+| `NIGHT_BRIGHTNESS` | 0.35 | night-side brightness at full white — earthshine off the ground, so it follows the imagery's albedo |
+| `NIGHT_GAMMA` | 0.60 | tone curve applied under it, expanding the dark end (`NIGHT_CURVE` LUT) |
+| `TWILIGHT_SIN` | sin(6°) | half-width of the terminator ramp — civil twilight |
+| `LIGHTS_GAIN` | 2.0 | how brightly extracted city light burns through at full night |
+| `BACKDROP_BLUE` | 0.6 | blue fraction subtracted to isolate lights from the composite's backdrop |
+| `RELIEF_STRENGTH` | 0.02 | relief depth — ≈23× vertical exaggeration; `#relief=` and `setRelief()` override it |
+| `RELIEF_SUN_REF` | sin(35°) | relief strength tapers linearly with sun elevation below this |
+| `RELIEF_CLAMP` | 0.62 | most relief may brighten or darken daylight |
+| `TEXTURE_MAX_WIDTH` | 5400 | decode cap, halved on mobile — 5400 × 2700 RGBA is 58 MB; the elevation map takes half that again, a quarter on mobile |
+| `PREVIEW_STEP` | 4 px | drag-preview sampling stride |
+| `SUN_TICK` | 60000 ms | automatic re-render interval |
 
 ### Key constants
 
@@ -274,6 +412,26 @@ See [Changes](#changes) for the order things happened in.
   brightness ramp. Because deep-water phase speed grows with period and the flow magnitude *is*
   the peak period, period-brightness is speed-brightness.
 
+- **Night side (RealView layers).** Two decisions, both measured on the August composite. *First,
+  the Black Marble composite is not city-lights-on-black* — it carries a blue landmass backdrop,
+  measured (36,33,60) over the empty Sahara, (23,19,41) over central Australia, (5,5,15) over open
+  ocean. Added raw it painted a second, brighter, violet-tinted terrain layer that Daylight had no
+  equivalent of. Cities are neutral-to-warm (b/r ≤ 1.26 at every settlement sampled, down to Alice
+  Springs at 44/41/55) while the backdrop is strongly blue-dominant (b/r 1.66–3.0 at every unlit
+  sample, snow and sea ice included), so `city = r − 0.6·b` separates them: the backdrop lands at
+  ≤0.1/255 everywhere measured and small towns survive. Night Lights is therefore Daylight plus
+  city light and nothing else — verified by rendering both layers under a frozen clock and
+  diffing the overlay canvas: 0 pixels darker, 0 alpha differences, 98.5% bit-identical.
+  *Second, the night side is a gamma curve, not a flat multiply.* A scalar preserves the imagery's
+  own contrast ratio, and at night levels that is exactly the problem — rainforest sits at 12/255
+  and open ocean at 2/255, a gap no phone screen resolves under ambient light, and raising the
+  scalar scales both by the same factor while pushing the bright end toward washing out the
+  terminator. γ = 0.60 takes the dark-land-minus-sea gap from 10.6 to 18.7 display levels with
+  bright ice unmoved (90.4 → 90.7); on the globe it cut night pixels below luminance 6 from 75% to
+  16% and raised night-side std-dev 6.08 → 10.16. `shade()` is written as
+  `rgb*s + nightValue(rgb)*dark` — algebraically the old flat multiply when the curve is linear,
+  and provably the untouched imagery at `s = 1`, so the curve cannot move the day side.
+
 ### HUD and menu
 
 The bottom-left HUD is collapsed by default to a slim bar (`☰ earth` plus a transient status
@@ -281,7 +439,7 @@ line, which stays visible while collapsed so load progress and errors always sho
 expands `#menu-panel` upward:
 
 - **Domain tabs** stack vertically — each tab header sits directly above its own `.tab-body`, one
-  domain expanded at a time. Atmosphere holds seven layers, Ocean six; all are live.
+  domain expanded at a time. Atmosphere holds seven layers, Ocean six, RealView two; all are live.
 - **Layer buttons** dispatch a `layerchange` `CustomEvent` with the layer id.
   `loadLayer()` in the engine swaps the dataset(s), restarts the pipeline, and syncs the
   active-button state (single source of truth), including revealing the tab that owns the layer
@@ -389,6 +547,50 @@ dataset added by a future layer is picked up automatically. Required environment
 git-ignored `.env/r2`): `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional
 `R2_BUCKET` (default `earth-data`). It also needs the `brotli` binary on `PATH`.
 
+### The static imagery (RealView layers)
+
+A second git-ignored class of data, with a deliberately different lifecycle from the weather
+JSONs: the 12 Blue Marble monthly composites, the Black Marble night lights and the GEBCO
+elevation map — **21.8 MB for 14 files**. The two colour sets share one 5400 × 2700 grid
+(0.0667°/px, ~7.4 km at the equator); the elevation map is a quarter of that, because relief
+shading consumes its *gradient* and mountains are large features. They follow the same local-vs-R2 split through `DATA_ROOT`, so localhost serves them from
+`public/data/` and production from the bucket — but they are *static*, dated 2004 and 2016, and
+must never enter the refresh loop.
+
+Hence two separate one-off scripts rather than an extension of `upload_data.sh`, which globs
+`current-*.json` only and is what the 6-hourly workflow runs:
+
+- `scripts/fetch_textures.sh` downloads `world.topo.2004MM.3x5400x2700.jpg` ×12 from
+  `assets.science.nasa.gov` and the Black Marble composite from `eoimages.gsfc.nasa.gov`, writing
+  `bluemarble-2004MM.jpg`, `blackmarble-2016-5400.jpg` and `elevation-gebco-1350.png`. Existing
+  files are skipped unless `FORCE=1`. Needs `ffmpeg` as well as `curl`, for the two resamples
+  below.
+- **The night lights are fetched at 3 km and downscaled here, not in the browser.** NASA publishes
+  that composite at 0.1° (3600 × 1800) and at 3 km (13500 × 6750). The 0.1° file is 1.5× coarser
+  per axis than the day imagery, and the mismatch shows as a smudge under the sharp daytime
+  coastline once the globe is zoomed past country level. The 3 km file cures it but is 91 Mpx —
+  ~364 MB as RGBA — and every client would decode all of it only for `buildTexture()` to discard
+  92% at `TEXTURE_MAX_WIDTH`. Resampling once, where the imagery is already known to be static,
+  means the browser downloads 1.3 MB and decodes exactly the 5400 × 2700 it keeps. `lanczos` over
+  `area`/`bilinear`: measured on a north-India crop it retains the most pixel-to-pixel detail
+  (17.3 vs 15.4), and its ringing lifts worst unlit-backdrop leakage through the `r − 0.6·b`
+  extraction only to 1.4/255, still eight times below the dimmest settlement that must survive.
+  On the rendered globe at 6× zoom this is +15% edge energy over the 0.1° file.
+- **The elevation map is likewise fetched large and resampled here** — 21600 × 10800 down to
+  1350 × 675 — for the same reason, decode cost rather than bandwidth: at 2700 × 1350 it added
+  505 ms to a layer load and 38 MB of heap, against 113 ms and 1 MB at half that. **It is PNG,
+  and that is not a preference**: relief shading differentiates this map, and JPEG's ringing
+  injects ~28% noise into exactly that quantity. Lossless costs 0.17 MB against 0.05 MB.
+- `scripts/upload_textures.sh` ships them to R2 with `image/jpeg` and
+  `public, max-age=31536000, immutable`. A year-long immutable cache is safe because the file
+  names carry the composite's own date — and, for the night lights, its grid, so a future
+  resample lands on a new key instead of behind a year-long cache. Same `.env/r2` credentials as
+  `upload_data.sh`.
+
+**No brotli here**: JPEG is already entropy-coded — measured, `-q 9` saves 0.4% for ~2 s of CPU
+per file. `sunlight.js` sets `crossOrigin="anonymous"` on the images because it reads the pixels
+back with `getImageData`, which throws on a tainted canvas.
+
 ### Compression: pre-compressed objects, not edge compression
 
 **r2.dev never compresses on the fly** — re-measured 2026-08-21, offering `gzip, br, zstd` still
@@ -408,7 +610,14 @@ before adopting this:
 | nothing | *(no encoding)* | Cloudflare decompresses at the edge |
 
 So clients that cannot take brotli are served correct raw bytes rather than breaking — the
-degradation is graceful, which is what makes this safe on the development URL. Rollback is a plain
+degradation is graceful in *correctness*. It is not cheap, though, and the table's middle row is
+the one to notice: a gzip-capable client does **not** get gzip, it gets the full uncompressed
+object, because Cloudflare decompresses the stored brotli at the edge and re-encodes nothing.
+Re-measured on the surface wind layer: **1.58 MB with `br`, 8.94 MB without — 5.7×**. Every
+current browser advertises `br` over HTTPS, so this normally never fires; the cases that do are a
+plain-`http://` origin (Chrome and Firefox both withhold `br` on insecure origins) and any proxy
+or privacy layer that rewrites `Accept-Encoding` in order to inspect bodies. Worth checking before
+blaming a slow mobile load on the renderer. Rollback is a plain
 re-upload of the uncompressed files to the same keys.
 
 Why `-q 9`: across the datasets it beats `gzip -9` (17.3 MB vs 18.9 MB on the 12-dataset corpus)
@@ -417,6 +626,9 @@ compression cost is ~11 s of CPU. Vercel independently serves the code and topol
 `content-encoding: br`, as it always has.
 
 ### The fourteen datasets
+
+These are the weather datasets only — the RealView layers' JPEGs are not among them (they are
+static, never refreshed, and not grib2json; see [The static imagery](#the-static-imagery-realview-layers)).
 
 All in grib2json format (the subset of header fields `wind.js` reads), all 0.25° global grids,
 ~119 MB total raw / ~20 MB as served ([Compression](#compression-pre-compressed-objects-not-edge-compression)).
@@ -610,6 +822,28 @@ the next firing into a half-finished upload.
   `Selected depth:` line is worth reading anyway.
 - `pkill -f "http.server 8421"` matches **its own command line** and kills the shell running it.
   Use a recorded PID, or a pattern that cannot match the killer.
+- **`isMobile()` is a user-agent regex, and privacy browsers lie.** Its only effect is
+  `PARTICLE_REDUCTION` in the engine and halving `TEXTURE_MAX_WIDTH` in the renderer — but a
+  browser spoofing a desktop UA (common in ad-blocking and privacy builds) gets the full desktop
+  particle count and full-size textures on phone hardware, which looks exactly like "the render
+  got slow" and has nothing to do with the layer being viewed.
+- **ffmpeg infers muxer *and codec* from the file extension, and `.part` tells it neither.**
+  `fetch_textures.sh` writes through a `.part` temporary like every other download here, so both
+  must be spelled out. Omitting `-f image2` fails loudly ("Unable to choose an output format",
+  which never mentions extensions). Omitting `-c:v` fails **silently**: the image2 muxer defaults
+  to MJPEG, so a `.png` output is written as a lossy JPEG — which for a heightfield about to be
+  differentiated is a quiet disaster.
+- **A JPEG "night lights" composite is not lights on black.** NASA's Black Marble 2016 carries a
+  faint blue landmass backdrop everywhere, open ocean included. Anything that adds such an image
+  on top of other imagery is also adding a terrain layer — sample an empty desert pixel before
+  assuming the black is black.
+- **Comparing two renders of a sun-dependent layer needs a frozen clock.** The limb glow is
+  latched from `sunTime` at millisecond precision while `#data-date` shows only minutes, so two
+  page loads seconds apart look identical in the HUD yet drift sub-pixel along the limb — enough
+  to scatter ±1 LSB noise across a screenshot diff and fake a regression. Override `Date` before
+  the page scripts run, and diff the `#overlay` canvas rather than a composited screenshot.
+- **`git diff --stat`'s number is insertions *plus* deletions**, the bar-graph width — not
+  insertions. Use `--numstat` when the count matters.
 - Dead ends already explored for ocean currents: NOMADS has no RTOFS filter, RTOFS 2ds is
   netCDF-only, NOMADS OPeNDAP is retired, OSCAR/jplOscar is stale. The working non-CMEMS fallback
   is NOAA CoastWatch ERDDAP `noaacwBLENDEDNRTcurrentsDaily` (0.25° blended geostrophic,
@@ -679,10 +913,13 @@ Each entry is root cause → fix, with how it was verified.
 ## Version control / feature deployment structure
 
 - **`main` is the only long-lived branch**, always deployable; Vercel's production deployment
-  points at it. Everything else is short-lived: branch off `main`, build, verify, merge with
-  `--no-ff`, delete. Vercel gives every branch a preview URL, which fits the screenshot-based
-  visual verification workflow — compare a branch's render against production side by side before
-  merging.
+  points at it. Everything else is short-lived: branch off `main`, build, verify, merge, delete.
+  Vercel gives every branch a preview URL, which fits the screenshot-based visual verification
+  workflow — compare a branch's render against production side by side before merging.
+- **Merges are linear.** Because a branch is squashed to one commit per work day before it lands
+  and `main` has not moved underneath it, the merge is a plain fast-forward and `main` stays a
+  straight line with no merge commits. Earlier branches were merged `--no-ff`, so a few merge
+  commits survive further back in the history.
 - **One short-lived branch per render** (`feature/<Layer>`), and **shared-engine work goes in its
   own `refactor/…` branch that merges first**. The engine is a single file, so two feature branches
   editing it independently make the second merge painful; with the refactor landed first, each
@@ -727,6 +964,72 @@ Each entry is root cause → fix, with how it was verified.
   Local uploads additionally need the `brotli` binary on `PATH`.
 
 ## Changes
+
+### 2026-08-22
+
+- **The RealView layers** (`feature/Daylight`) — a third menu domain beside Atmosphere and
+  Ocean, holding photographic depictions of the surface rather than fields over a wireframe.
+  The first two are sun-lit, NASA imagery shaded by where the sun actually is: **Daylight**
+  (Blue Marble NG, the current month's composite) and **Night Lights** (the same, plus VIIRS
+  city lights). Solar
+  geometry from a vendored SunCalc v1.9.0; the subsolar point falls out of one `getPosition()`
+  call at the north pole and was checked against SunCalc itself and against the physics.
+- **Renderer plug-in architecture** — rather than special-casing photography inside the weather
+  engine, `wind.js` gained a small contract: a script registering on `window.EarthRenderers` has
+  its layers merged into `LAYERS`, and while one is displayed it owns the overlay instead of the
+  grid → field → particles pipeline. The engine keeps every piece of state that holds a render
+  onto the globe; the plug-in only draws. All 13 existing weather layers came through the
+  refactor pixel-identical, verified by canvas fingerprints.
+- **Static-imagery data class** — `fetch_textures.sh` and `upload_textures.sh`, kept out of
+  `upload_data.sh` so the 6-hourly workflow can never re-upload 22 MB of 2004 and 2016 JPEGs.
+  The night lights are pulled at 3 km and resampled to the Blue Marble's own 5400 × 2700 grid at
+  fetch time, so the two textures match and no client decodes 91 Mpx to keep 8% of it.
+  Git-ignored like the weather data, immutable-cached for a year because the filenames carry the
+  composite's date.
+- **Night-side shading, three findings.** The Black Marble composite turned out to carry a blue
+  landmass backdrop rather than being lights-on-black, so city lights are now *extracted*
+  (`r − 0.6·b`) and Night Lights is provably Daylight plus city light and nothing else. The night
+  side itself became a gamma curve rather than a flat multiply, because a scalar cannot separate
+  dark land from sea — it scales both equally. And the day side is untouched by construction:
+  `shade()` is written so `s = 1` returns the imagery unmodified.
+- **Verification harness** — a headless CDP probe fingerprinting all four canvases per layer, plus
+  variants that freeze `Date` so two builds can be diffed at bit-identical sun geometry. This is
+  what made "0 pixels darker" and "all 13 weather layers identical" statements rather than hopes.
+- **Relief, as a third RealView layer.** NASA GEBCO elevation, resampled once at fetch time to
+  1350 × 675 and shipped as a 0.17 MB PNG; the gradient is precomputed at load into two
+  `Int16Array`s, so a frame costs one extra sample per pixel and no trigonometry. Default
+  `RELIEF_STRENGTH` 0.02 — about 23× vertical exaggeration — tapering with sun elevation, and
+  tunable live through `#relief=` or `EarthRenderers.sunlight.setRelief()`. Deliberately its own
+  layer: Daylight and Night Lights are the imagery as recorded, and both are byte-identical to
+  what they rendered before relief existed.
+
+  Three corrections worth recording, since each produced output that looked plausible:
+
+  - **The relief was half-inverted.** Two independent sign errors, one cancelling the other: the
+    textbook Sobel kernel `[1,2,0,-2,-1]` returns *minus* ∂h/∂x, and east is `N×n`, so
+    `ê·s = n·(s×N)` — the code had `N×s`. East-west slopes shaded correctly while north-south
+    shaded backwards, which the Blue Marble's own baked hillshade hides almost perfectly. Found
+    by a synthetic test on geometry with an unarguable answer ("a slope rising eastward faces
+    west, so with the sun in the east it must be darker"), not by looking at renders.
+  - **Relief must not feed the terminator.** Perturbing `lit` directly is the obvious
+    implementation and is wrong: the twilight ramp is only ±sin(6°) wide, so real slopes crossed
+    it and rendered as night — blue earthshine blobs with warm fringes scattered across sunlit
+    continents. It is now a clamped multiplier on the daylight term.
+  - **`ffmpeg -f image2` silently defaults to MJPEG**, so the first elevation map was a lossy
+    JPEG named `.png`, carrying up to 35 code levels of error into the one file whose gradient
+    has to be clean. `-c:v png` is now explicit; see [Gotchas](#gotchas-learned-the-hard-way).
+
+  Also: `upload_textures.sh` globbed `*.jpg` only, so the elevation map would never have reached
+  R2. It now globs `*.png` too and content-types each file accordingly.
+
+  **Shipped**: all 14 objects uploaded to the bucket (21.8 MB) and the three layers verified on
+  the deployed site fetching from it, with 0 console errors and the 13 weather layers still
+  rendering 13/13. The one assumption that had never been exercised — that `getImageData` can
+  read the imagery back cross-origin — is now confirmed rather than assumed: R2 returns
+  `Access-Control-Allow-Origin: *` on all 14, and the browser decodes them without tainting.
+- **Domain named "RealView"** — the tab and its `data-tab="realview"` id name the domain, so
+  imagery layers that are not sun-lit can join it later. `js/sunlight.js` and
+  `EarthRenderers.sunlight` keep their names: that plug-in really is about sunlight.
 
 ### 2026-08-21
 

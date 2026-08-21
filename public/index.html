@@ -40,6 +40,15 @@
                     <button class="layer" data-layer="sst">Temperature</button>
                     <button class="layer" data-layer="waves">Waves</button>
                 </div>
+                <!-- RealView is not weather: photographic depictions of the surface,
+                     served by renderer plug-ins (js/sunlight.js is the first) rather than
+                     by the engine's grid → particles pipeline. -->
+                <button class="tab" data-tab="realview" role="tab">RealView</button>
+                <div class="tab-body" data-tab="realview" hidden>
+                    <button class="layer" data-layer="daylight">Daylight</button>
+                    <button class="layer" data-layer="nightlights">Night Lights</button>
+                    <button class="layer" data-layer="relief">Relief</button>
+                </div>
             </div>
 
             <p id="data-label">GFS 0.25&deg; &nbsp;|&nbsp; NCEP / US National Weather Service</p>
@@ -65,9 +74,13 @@
 
     <script src="libs/d3.v7.min.js"></script>
     <script src="libs/topojson-client.min.js"></script>
+    <script src="libs/suncalc.js"></script>
     <script src="js/menu.js"></script>
     <!-- Generated lookup table read by wind.js at boot; must precede it. -->
     <script src="js/tz-centers.js"></script>
+    <!-- Renderer plug-in: registers its layers on window.EarthRenderers, which wind.js
+         merges into the layer registry at boot — so it must precede wind.js too. -->
+    <script src="js/sunlight.js"></script>
     <script src="js/wind.js"></script>
 </body>
 </html>

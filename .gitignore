@@ -8,6 +8,12 @@ __pycache__/
 # Weather data is not versioned: refresh scripts write it here for local dev,
 # scripts/upload_data.sh ships it to the Cloudflare R2 bucket for production.
 public/data/current-*.json
+# NASA imagery for the RealView layers: static, but ~22 MB of pixels rather
+# than code — same split (fetch_textures.sh writes them here, upload_textures.sh
+# ships them to R2). The vector topologies below stay in git.
+public/data/bluemarble-*.jpg
+public/data/blackmarble-*.jpg
+public/data/elevation-*.png
 .vscode/
 AGENTS.md
 # Deployment runbook: kept local only (holds the live bucket URL + ops notes),
