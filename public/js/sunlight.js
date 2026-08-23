@@ -34,6 +34,18 @@
     var BACKDROP_BLUE = 0.6;        // blue fraction subtracted to isolate lights — see shade()
     var TEXTURE_MAX_WIDTH = 5400;   // decode cap (halved on mobile): 5400 × 2700 RGBA is 58 MB
     var PREVIEW_STEP = 4;           // drag preview: sample every Nth CSS px, upscaled with smoothing
+    // Deep zoom on the imagery. The 5400-wide composites carry 15 px per degree; the globe
+    // renders scale·π/180 px per degree at its centre, so on a 790 px-tall viewport the
+    // texture runs out of detail at 2.6× and on a 1080 px one at 1.9×. Past DETAIL_ZOOM the
+    // 21600-wide masters (60 px/deg) take over — but only over the visible cap, since the
+    // whole master is 933 MB as RGBA and unusable as one readback. See ensureDetail().
+    var DETAIL_ZOOM = 2.5;          // ×fitted scale past which the high-res masters engage. 2.5 and
+                                    // not 3 because the 5400 texture runs out at 2.59 on a 790 px
+                                    // viewport: swapping at 3 would leave a band of visible softness
+                                    // just below the threshold, which is where it was first noticed.
+    var DETAIL_MAX_CROP = 3072;     // px cap per axis on the cropped readback (3072² RGBA = 38 MB)
+    var DETAIL_MARGIN = 0.18;       // crop overshoot past the visible cap, as a fraction of span
+    var DETAIL_REZOOM = 1.6;        // re-cut the crop once zoom has grown this much since it was cut
     var RELIEF_STRENGTH = 0.02;     // terrain relief depth — see buildRelief()
     var RELIEF_SUN_REF = Math.sin(35 / (180 / Math.PI));   // taper below this sun elevation
     var RELIEF_CLAMP = 0.62;        // relief may brighten or darken daylight by at most this
@@ -76,6 +88,16 @@
                                     // frame, so imagery, limb glow and click readout cannot disagree
     var preview = null;             // reused low-res canvas for the drag preview
     var terrain = null;             // elevation-gradient sampler, or null before it loads
+    var baseDay = null;             // the 5400 samplers, kept as the fallback outside the crop
+    var baseNight = null;
+    var hiDay = null;               // high-res URLs for the displayed layer, or null
+    var hiNight = null;
+    var hiRelief = null;
+    var images = {};                // decoded high-res <img> by URL, held for re-cropping
+    var detail = null;              // {win, zoom, day, night} — the current high-res crop
+    var detailBusy = false;         // a fetch or a re-cut is in flight
+    var detailFailed = false;       // one failure is enough; do not re-request 21 MB on every settle
+    var terrainHi = false;          // the 2700 elevation map has replaced the 1350 one
     var reliefK = RELIEF_STRENGTH;  // live-tunable; see setRelief() at the bottom
 
     // ------------------------------------------------------------------------------------------------
@@ -164,6 +186,219 @@
         }
 
         return {sample: sample, width: width, height: height};
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // Deep-zoom detail: a high-res crop of the visible cap
+    //
+    // The masters are 21600×10800 (Blue Marble) and 13500×6750 (Black Marble). Neither can go
+    // through buildTexture: 933 MB and 364 MB of RGBA respectively, for a globe that shows at
+    // most a hemisphere and, past DETAIL_ZOOM, far less. So the <img> is decoded once and kept,
+    // and only the window the camera can actually see is read back — measured in Chromium, a
+    // full-resolution cropped drawImage off the 21600 master costs 4 ms and the getImageData
+    // that follows a few hundred, once per settle rather than per frame.
+    //
+    // A tile pyramid would be the other way to do this, and was rejected: it needs the masters
+    // sliced into ~900 objects at fetch time, a second index to serve them, and a per-pixel
+    // dispatch across tile edges in the render loop — all to solve a problem one crop already
+    // solves, because the visible region is contiguous by construction.
+
+    /** The spherical cap the camera can see: centre (the negated rotation) and angular radius. */
+    function visibleCap() {
+        var projection = engine.projection;
+        var view = engine.view();
+        var r = projection.rotate();
+        // Half the viewport diagonal, so the cap covers the corners and not just the axes.
+        var reach = Math.sqrt(view.width * view.width + view.height * view.height) / 2;
+        return {
+            λc: -r[0],
+            φc: -r[1],
+            r: Math.asin(Math.min(1, reach / projection.scale())) * DEG
+        };
+    }
+
+    /** Latitude band of a cap, clamped at the poles. */
+    function capLatitudes(cap) {
+        return [Math.max(-90, cap.φc - cap.r), Math.min(90, cap.φc + cap.r)];
+    }
+
+    /**
+     * Half the longitude extent of a cap, or null when it reaches over a pole and the extent
+     * is the whole circle. asin(sin r / cos φ) is the tangent-meridian of a small circle —
+     * the same formula a geographic bounding box uses.
+     */
+    function capHalfSpan(cap) {
+        var cosφ = Math.cos(cap.φc / DEG), sinR = Math.sin(cap.r / DEG);
+        if (Math.abs(cap.φc) + cap.r >= 90 || cosφ <= sinR) return null;
+        return Math.asin(sinR / cosφ) * DEG;
+    }
+
+    /** The lon/lat window to cut, the visible cap plus DETAIL_MARGIN on each span. */
+    function cropWindow(cap) {
+        var lat = capLatitudes(cap);
+        var mφ = (lat[1] - lat[0]) * DETAIL_MARGIN;
+        var south = Math.max(-90, lat[0] - mφ), north = Math.min(90, lat[1] + mφ);
+        var half = capHalfSpan(cap);
+        if (half === null) {
+            return {west: -180, south: south, north: north, spanλ: 360, spanφ: north - south};
+        }
+        var spanλ = Math.min(360, half * 2 * (1 + DETAIL_MARGIN));
+        return {west: cap.λc - spanλ / 2, south: south, north: north,
+                spanλ: spanλ, spanφ: north - south};
+    }
+
+    /** Is λ inside the window, allowing for the wrap at ±180? */
+    function inWindow(win, λ) {
+        var d = λ - win.west;
+        return d - 360 * Math.floor(d / 360) <= win.spanλ;
+    }
+
+    /** Does an existing crop still cover everything the camera can see? */
+    function covers(win, cap) {
+        var lat = capLatitudes(cap);
+        if (lat[0] < win.south || lat[1] > win.north) return false;
+        if (win.spanλ >= 360) return true;
+        var half = capHalfSpan(cap);
+        if (half === null) return false;                  // now over a pole; needs the full circle
+        return inWindow(win, cap.λc - half) && inWindow(win, cap.λc + half);
+    }
+
+    /**
+     * Reads one lon/lat window out of a decoded equirectangular master into a bilinear sampler,
+     * downscaling to DETAIL_MAX_CROP per axis if the window is wider than the cap allows.
+     *
+     * The cap is not a quality compromise at the zooms that matter. At 3× the visible window is
+     * ~118° across, so 3072 px is 26 px/deg against the ~17 the screen resolves; by 6× the
+     * window has shrunk inside the cap and the crop is the master's own 60 px/deg. The two axes
+     * are capped independently, which is what keeps polar views honest: near a pole the window
+     * spans all 360° of longitude but only a narrow latitude band, and longitude is exactly
+     * where degrees are cheap.
+     */
+    function buildCrop(image, win) {
+        var W0 = image.naturalWidth, H0 = image.naturalHeight;
+        var sw = win.spanλ / 360 * W0, sh = win.spanφ / 180 * H0;
+        var w = Math.max(2, Math.min(Math.round(sw), DETAIL_MAX_CROP));
+        var h = Math.max(2, Math.min(Math.round(sh), DETAIL_MAX_CROP));
+        var canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        var ctx = canvas.getContext("2d", {willReadFrequently: true});
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        var sx = (win.west + 180) / 360 * W0;
+        sx -= W0 * Math.floor(sx / W0);                   // into [0, W0)
+        var sy = (90 - win.north) / 180 * H0;
+        // A window straddling the antimeridian is two draws; drawImage will not wrap a source
+        // rectangle off the right edge, it clamps, which would smear the last column across it.
+        var head = Math.min(sw, W0 - sx);
+        var headW = Math.max(1, Math.round(head / sw * w));
+        ctx.drawImage(image, sx, sy, head, sh, 0, 0, headW, h);
+        if (head < sw - 0.5) {
+            ctx.drawImage(image, 0, sy, sw - head, sh, headW, 0, w - headW, h);
+        }
+        var data = ctx.getImageData(0, 0, w, h).data;
+        var lastX = w - 1, lastY = h - 1;
+
+        // Bilinear, clamped rather than wrapped in both axes: the window carries DETAIL_MARGIN
+        // of slack, so the clamped edge is never inside the visible disc.
+        function sampleIf(λ, φ, out) {
+            var dλ = λ - win.west;
+            dλ -= 360 * Math.floor(dλ / 360);
+            if (dλ > win.spanλ) return false;
+            var dφ = win.north - φ;
+            if (dφ < 0 || dφ > win.spanφ) return false;
+            var x = dλ / win.spanλ * w - 0.5;
+            var y = dφ / win.spanφ * h - 0.5;
+            var xi = Math.floor(x), yi = Math.floor(y);
+            var fx = x - xi, fy = y - yi;
+            var x0 = xi < 0 ? 0 : xi > lastX ? lastX : xi;
+            var x1 = xi + 1 < 0 ? 0 : xi + 1 > lastX ? lastX : xi + 1;
+            var y0 = yi < 0 ? 0 : yi > lastY ? lastY : yi;
+            var y1 = yi + 1 < 0 ? 0 : yi + 1 > lastY ? lastY : yi + 1;
+            var a = (y0 * w + x0) * 4, b = (y0 * w + x1) * 4;
+            var c = (y1 * w + x0) * 4, e = (y1 * w + x1) * 4;
+            var w0 = (1 - fx) * (1 - fy), w1 = fx * (1 - fy), w2 = (1 - fx) * fy, w3 = fx * fy;
+            out[0] = data[a] * w0 + data[b] * w1 + data[c] * w2 + data[e] * w3;
+            out[1] = data[a + 1] * w0 + data[b + 1] * w1 + data[c + 1] * w2 + data[e + 1] * w3;
+            out[2] = data[a + 2] * w0 + data[b + 2] * w1 + data[c + 2] * w2 + data[e + 2] * w3;
+            return true;
+        }
+
+        return {sampleIf: sampleIf, width: w, height: h};
+    }
+
+    /** Crop first, 5400 master outside it. One predictable branch per pixel per texture. */
+    function layered(base, crop) {
+        return {
+            sample: function (λ, φ, out) {
+                if (!crop.sampleIf(λ, φ, out)) base.sample(λ, φ, out);
+            },
+            width: crop.width,
+            height: crop.height
+        };
+    }
+
+    /** Decodes an image and keeps it, without reading any pixels back. */
+    function decode(url) {
+        if (images[url]) return Promise.resolve(images[url]);
+        return new Promise(function (resolve, reject) {
+            var img = new Image();
+            img.crossOrigin = "anonymous";
+            img.onload = function () { resolve(images[url] = img); };
+            img.onerror = function () { reject(new Error("texture: " + url.split("/").pop())); };
+            img.src = url;
+        });
+    }
+
+    /**
+     * Called from render(), which the engine only reaches once a gesture has settled — the same
+     * discipline the 10m coastline fetch uses. Nothing here runs per drag frame: the preview
+     * keeps sampling the 5400 texture, and the sharper pixels arrive on the settle after.
+     */
+    function ensureDetail() {
+        if (!hiDay || detailFailed || engine.isMobile()) return;   // phones keep the 5400 masters
+        if (engine.zoom() <= DETAIL_ZOOM) {
+            if (detail) {                      // zoomed back out: drop ~40 MB of crop
+                detail = null;
+                day = baseDay;
+                night = baseNight;
+            }
+            return;
+        }
+        if (detailBusy) return;
+        var cap = visibleCap();
+        var zoom = engine.zoom();
+        if (detail && covers(detail.win, cap) && zoom < detail.zoom * DETAIL_REZOOM) return;
+        detailBusy = true;
+        // The three assets fail independently. Only the Blue Marble master is load-bearing —
+        // a missing night or elevation twin should cost that layer its own upgrade, not the
+        // imagery's, so those two resolve to null instead of rejecting the set.
+        function optional(p) {
+            return p ? p.catch(function (err) { console.error(err); return null; }) : Promise.resolve(null);
+        }
+        Promise.all([
+            decode(hiDay),
+            optional(hiNight ? decode(hiNight) : null),
+            optional(hiRelief && !terrainHi ? texture(hiRelief, buildRelief) : null)
+        ]).then(function (im) {
+            var win = cropWindow(visibleCap());
+            detail = {
+                win: win,
+                zoom: engine.zoom(),
+                day: buildCrop(im[0], win),
+                night: im[1] ? buildCrop(im[1], win) : null
+            };
+            day = layered(baseDay, detail.day);
+            night = baseNight && detail.night ? layered(baseNight, detail.night) : baseNight;
+            if (im[2]) terrain = im[2];   // relief upgrades whole; it is small enough not to crop
+            terrainHi = true;             // attempted — succeeded or not, do not ask again
+            detailBusy = false;
+            engine.requestRender();   // covers() is satisfied now, so this settles in one pass
+        }).catch(function (err) {
+            console.error(err);
+            detailBusy = false;
+            detailFailed = true;
+        });
     }
 
     /**
@@ -407,6 +642,9 @@
      * the UI. There is no flow field and no particle work, so this is the whole frame.
      */
     function render(cancel) {
+        // Settled view: this is where a sharper crop is worth cutting (and where the engine
+        // has already stopped calling preview()).
+        ensureDetail();
         var projection = engine.projection;
         var scale = engine.overlayScale();
         var canvas = engine.overlay, ctx = engine.overlayCtx;
@@ -625,6 +863,9 @@
             // sea ice where they belong for the season on screen, at no extra cost.
             var month = (new Date().getUTCMonth() + 101).toString().slice(1);
             var blueMarble = dataRoot + "bluemarble-2004" + month + ".jpg";
+            // The deep-zoom masters, fetched only if the view closes past DETAIL_ZOOM. Each
+            // name carries its grid, as the R2 objects are immutable and served forever.
+            var blueMarbleHi = dataRoot + "bluemarble-2004" + month + "-21600.jpg";
             var credit = "NASA Blue Marble NG &nbsp;|&nbsp; MODIS / Terra, NASA Earth Observatory";
             var placeholder = "click a point for sun elevation";
             // Relief is its own layer rather than a treatment applied to the other two:
@@ -632,12 +873,16 @@
             // the camera never saw belongs in a layer a viewer chooses on purpose. The three
             // share one Blue Marble URL, so switching between them decodes nothing.
             return {
-                "daylight": {texture: blueMarble, label: "Daylight",
+                "daylight": {texture: blueMarble, textureHi: blueMarbleHi, label: "Daylight",
                     credit: credit, placeholder: placeholder},
-                "nightlights": {texture: blueMarble, night: dataRoot + "blackmarble-2016-5400.jpg",
+                "nightlights": {texture: blueMarble, textureHi: blueMarbleHi,
+                    night: dataRoot + "blackmarble-2016-5400.jpg",
+                    nightHi: dataRoot + "blackmarble-2016-13500.jpg",
                     label: "Night Lights", placeholder: placeholder,
                     credit: credit + " &nbsp;+&nbsp; VIIRS Black Marble 2016"},
-                "relief": {texture: blueMarble, relief: dataRoot + "elevation-gebco-1350.png",
+                "relief": {texture: blueMarble, textureHi: blueMarbleHi,
+                    relief: dataRoot + "elevation-gebco-1350.png",
+                    reliefHi: dataRoot + "elevation-gebco-2700.png",
                     label: "Relief", placeholder: placeholder,
                     credit: credit + " &nbsp;+&nbsp; GEBCO elevation"}
             };
@@ -653,13 +898,22 @@
         tick: SUN_TICK,   // the engine re-renders this often; 0 would mean a static layer
 
         load: function (layer) {
+            // The crop belongs to the layer that was showing, not to the one arriving: a
+            // Daylight crop has no night plane and Relief wants a different elevation map.
+            detail = null;
+            detailBusy = false;
+            detailFailed = false;
+            terrainHi = false;
+            hiDay = layer.textureHi || null;
+            hiNight = layer.nightHi || null;
+            hiRelief = layer.reliefHi || null;
             return Promise.all([
                 texture(layer.texture),
                 layer.night ? texture(layer.night) : null,
                 layer.relief ? texture(layer.relief, buildRelief) : null
             ]).then(function (t) {
-                day = t[0];
-                night = t[1];
+                day = baseDay = t[0];
+                night = baseNight = t[1];
                 terrain = t[2];
             });
         },

@@ -1131,12 +1131,18 @@
     //   decorate(ctx)                          draw on #lines, above the overlay
     //   scaleBar(ctx, w, h) → label            paint the legend, return its caption
     //   readout(λ, φ) → text                   the click readout, minus the coordinates
+    //
+    // zoom() and requestRender() exist for renderers that swap in sharper assets as the view
+    // closes in: zoom() is the same ×fitted-scale number the URL hash carries, and
+    // requestRender() re-enters the settled-view path once a lazily-fetched asset is ready.
     var ENGINE = {
         projection: projection,
         overlay: overlayCanvas,
         overlayCtx: overlayCtx,
         view: function () { return view; },
         bounds: globeBounds,
+        zoom: function () { return projection.scale() / initialScale; },
+        requestRender: function () { recompute(); },
         overlayScale: function () { return overlayScale; },
         setStatus: setStatus,
         setDate: function (text) { document.getElementById("data-date").textContent = text; },

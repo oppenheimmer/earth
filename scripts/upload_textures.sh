@@ -3,10 +3,12 @@
 # bucket, so the deployed site can project it onto the globe (same data/code
 # split as the weather JSONs: git-ignored locally, served from R2_DATA_ROOT).
 #
-# Kept separate from upload_data.sh on purpose: these fourteen objects are
-# static — one 2004 composite per month, the night lights, and the elevation
-# map — so the 6-hourly refresh workflow must never re-upload them. Run this
-# by hand, once.
+# Kept separate from upload_data.sh on purpose: these objects are static — one
+# 2004 composite per month, the night lights and the elevation map, plus the
+# deep-zoom twin of each — so the 6-hourly refresh workflow must never re-upload
+# them. Run this by hand, once. The globs below pick the high-res files up on
+# their names, so nothing here needed changing when they were added; the volume
+# did, from ~22 MB to ~285 MB.
 #
 # No brotli here either: JPEG is already entropy-coded (measured: -q 9 saves
 # 0.4% for ~2 s of CPU per file), and an immutable year-long cache is safe

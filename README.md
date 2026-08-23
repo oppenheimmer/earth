@@ -106,8 +106,9 @@ hours without touching git ([Automated refresh](#automated-refresh)).
         │                        #   wind.js picks local vs R2 by hostname (see Data)
         ├── bluemarble-*.jpg     # 12 monthly Blue Marble NG composites — GIT-IGNORED, static:
         │                        #   fetch_textures.sh writes them, upload_textures.sh ships them
-        ├── blackmarble-*.jpg    # VIIRS night lights — GIT-IGNORED, same lifecycle
-        ├── elevation-gebco-*.png  # GEBCO elevation, for Relief — GIT-IGNORED, ditto
+        │                        #   *-21600.jpg are the deep-zoom twins, fetched past DETAIL_ZOOM
+        ├── blackmarble-*.jpg    # VIIRS night lights — GIT-IGNORED, same lifecycle (5400 + 13500)
+        ├── elevation-gebco-*.png  # GEBCO elevation, for Relief — GIT-IGNORED, ditto (1350 + 2700)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m) — in git
         ├── countries-50m.json   # world-atlas@2 countries topology (borders + land, idle detail)
         ├── countries-110m.json  # world-atlas@2 countries topology (borders + land, while dragging)
@@ -288,6 +289,14 @@ Lights are the imagery as the satellite recorded it, and shading the camera neve
 a viewer should switch on deliberately. All three share one Blue Marble URL, so moving between
 them decodes nothing.
 
+**Deep zoom.** The base composites are 5400 × 2700, which is 15 px per degree; the globe draws
+`scale · π/180` px per degree at its centre, so the imagery runs out of detail at 2.6× on a 790 px
+viewport and at 1.9× on a 1080 px one — the same softening on a big screen that a small one only
+reaches by zooming. Past `DETAIL_ZOOM` the 21600 × 10800 masters take over at 60 px/deg, giving
+roughly 10×. They cannot be decoded whole (933 MB as RGBA), so `ensureDetail()` keeps the decoded
+`<img>` and reads back only the window the camera can see — see [Deep-zoom detail](#fixed-bugs)
+below and the block comment above `visibleCap()` in `sunlight.js`.
+
 - **Imagery.** Blue Marble: Next Generation (MODIS/Terra, 2004), the 8 km composite, one image per
   month — the layer picks the current month and gets the season's snow line and vegetation for
   free. The `world.topo` variant is deliberate over `world.topo.bathy`: without bathymetric relief
@@ -353,6 +362,10 @@ them decodes nothing.
 | `RELIEF_SUN_REF` | sin(35°) | relief strength tapers linearly with sun elevation below this |
 | `RELIEF_CLAMP` | 0.62 | most relief may brighten or darken daylight |
 | `TEXTURE_MAX_WIDTH` | 5400 | decode cap, halved on mobile — 5400 × 2700 RGBA is 58 MB; the elevation map takes half that again, a quarter on mobile |
+| `DETAIL_ZOOM` | 2.5 | zoom past which the high-res masters are fetched and cropped (desktop only) |
+| `DETAIL_MAX_CROP` | 3072 px | cap per axis on the cropped readback — 3072² RGBA is 38 MB |
+| `DETAIL_MARGIN` | 0.18 | crop overshoot past the visible cap, as a fraction of each span |
+| `DETAIL_REZOOM` | 1.6 | re-cut the crop once zoom has grown this much since it was cut |
 | `PREVIEW_STEP` | 4 px | drag-preview sampling stride |
 | `SUN_TICK` | 60000 ms | automatic re-render interval |
 
@@ -582,6 +595,12 @@ Hence two separate one-off scripts rather than an extension of `upload_data.sh`,
   `bluemarble-2004MM.jpg`, `blackmarble-2016-5400.jpg` and `elevation-gebco-1350.png`. Existing
   files are skipped unless `FORCE=1`. Needs `ffmpeg` as well as `curl`, for the two resamples
   below.
+- **It also fetches a deep-zoom twin of each** — `bluemarble-2004MM-21600.jpg` (NASA's own
+  21600 × 10800 grid, 21 MB each), `blackmarble-2016-13500.jpg` (the 3 km original, no longer
+  discarded after the downscale) and `elevation-gebco-2700.png`. That takes the one-off from
+  ~22 MB to ~285 MB; `SKIP_HIRES=1` fetches the base set only, and the site then simply never
+  leaves the 5400 imagery. `upload_textures.sh` needed no change — its globs already match the
+  new names.
 - **The night lights are fetched at 3 km and downscaled here, not in the browser.** NASA publishes
   that composite at 0.1° (3600 × 1800) and at 3 km (13500 × 6750). The 0.1° file is 1.5× coarser
   per axis than the day imagery, and the mismatch shows as a smudge under the sharp daytime
@@ -1051,6 +1070,45 @@ Each entry is root cause → fix, with how it was verified.
       Norwegian Trench keeps its data — the boundary follows real bathymetry. The Surface layer is
       unchanged, having data everywhere the ocean is, and the atmosphere layers never reach the
       branch at all (`landFill` is false, so their dataless pixels stay transparent).
+  - **RealView imagery gets a deep-zoom tier.** The 5400 composites carry 15 px/deg while the
+    globe draws `scale · π/180` px/deg at its centre, so on a 790 px-tall viewport the imagery is
+    undersampled past **2.59×** — which is exactly where the softening was first reported, "around
+    2.50, quite noticeable by 3.00". A 1080 px-tall screen crosses the same line at 1.89×, so this
+    was never only a zoom problem. Past `DETAIL_ZOOM` the layers now switch to NASA's 21600 × 10800
+    masters (60 px/deg, ~10× before they in turn run out), Black Marble's native 13500 × 6750 and a
+    2700 × 1350 elevation map.
+    - **A crop, not a tile pyramid.** The Blue Marble master is 933 MB as RGBA and the Black Marble
+      one 364 MB, so neither can go through `buildTexture`. But the visible region is contiguous by
+      construction, so the `<img>` is decoded once and kept, and only the window on screen is read
+      back: `visibleCap()` gives the spherical cap from the rotation and `asin(reach/scale)`,
+      `cropWindow()` pads it by `DETAIL_MARGIN`, and `buildCrop()` cuts it. Measured in Chromium, a
+      full-resolution cropped `drawImage` off the 21600 master costs **4 ms** and the `getImageData`
+      after it a few hundred — once per settle, never per frame. A pyramid would have meant ~900
+      sliced objects, an index to serve them, and a per-pixel dispatch across tile edges.
+    - **Cheap degrees stay cheap.** The two axes cap independently at `DETAIL_MAX_CROP`. Near a pole
+      the window spans all 360° of longitude but a narrow latitude band, and longitude is precisely
+      where degrees are cheap — capping them together would have thrown away latitude resolution to
+      pay for longitude nobody can see.
+    - **The cap is not a compromise where it matters.** At 2.5× the window is widest and 3072 px is
+      26 px/deg against the ~16 the screen resolves; by 6× the window has shrunk inside the cap and
+      the crop is the master's own 60. Raising the cap would buy nothing a screen can show.
+    - **Loaded on the settle**, like the 10m coastline: `ensureDetail()` is called from `render()`,
+      never from `preview()`, so no drag frame waits on a 21 MB fetch. Zooming back out releases the
+      crop. One failure sets `detailFailed` and the layer stays on the 5400 imagery rather than
+      re-requesting 21 MB on every settle — verified by rendering with the file absent.
+    - Verified headless: at 6× over the Alps high-frequency detail rises **×3.69** against an
+      alignment offset of exactly (0, 0), so the crop's lon/lat mapping is right and the gain is
+      sharpening rather than a shift. At 3× the same measure moves only ×1.05, and that is correct
+      rather than disappointing — there the base supplies 0.80 of what the screen resolves and only
+      the top octave is missing, where at 6× it supplies 0.40 and three octaves are; the visible
+      difference at 3× is nonetheless plain. The antimeridian wrap is two `drawImage` calls, since
+      a source rectangle running off the right edge clamps rather than wraps and would smear the
+      last column; the join measures 0.53 code levels per channel against 0.09 for a typical column
+      and 0.56 for the worst ordinary one — present, sub-perceptual. Polar and 180°-centred views
+      both render clean.
+    - `DETAIL_ZOOM` is **2.5**, not the 3.0 originally asked for: the measured limit is 2.59, so a
+      threshold of 3 would have left a band of visible softness immediately below it — the band
+      where the problem was first noticed.
   - **`#rotate=` documented correctly.** The hash table called it the "initial center"; it is the
     d3 rotation, which is the *negation* of the centre (`projection.rotate([-home[0], -home[1], 0])`
     at boot). Caught by using the documented form to aim the verification screenshot at the British
