@@ -17,18 +17,29 @@
     var OVERLAY_ALPHA = Math.floor(0.72 * 255); // 0.4 in the original; near-opaque like nullschool — dark-background bleed turned the orange storm band brown
     var INTENSITY_SCALE_STEP = 10;            // step size of particle intensity color scale
     var MAX_PARTICLE_AGE = 100;               // max number of frames a particle is drawn before regeneration
-    var PARTICLE_LINE_WIDTH = 1.8;            // in device px — divided by devicePixelRatio at stroke time; fewer-but-thicker traces like nullschool
-    var PARTICLE_MULTIPLIER = 3.5;            // particle count scalar (7 in the original; fewer, thicker, distinct streamlines like nullschool)
+    var PARTICLE_LINE_WIDTH = 1.5;            // in device px — divided by devicePixelRatio at stroke time; thin dense traces like nullschool (below ~1.5 a dpr-1 stroke antialiases across two rows and reads grey)
+    var PARTICLE_MULTIPLIER = 6;              // particle count scalar (7 in the original; matched to nullschool's busier globe by comparison)
     var PARTICLE_REDUCTION = 0.75;            // reduce particle count to this fraction for mobile
     var FRAME_RATE = 40;                      // desired milliseconds per frame
     var NULL_WIND_VECTOR = [NaN, NaN, null];  // no wind data at this location [u, v, mag]
     var TRANSPARENT_BLACK = [0, 0, 0, 0];
-    var NO_DATA_GRAY = [51, 51, 56, 255];     // = drawMap's #333338 land fill; ocean layers paint
-                                              // dataless water (Caspian, coastal grid holes) like land
+    var NO_DATA_GRAY = [51, 51, 56, 255];     // sentinel for "ocean layer, no value here"; the write
+                                              // sites swap it for the hatch below (see noDataHatchAt)
+    // Dataless water on an ocean layer is hatched, not filled flat. The depth layers stop wherever
+    // the sea floor rises above them, so at 450 m whole shelf seas — North Sea, Irish Sea, Channel,
+    // Sunda — carry no value; painting them the land charcoal made them read as land, which they
+    // are not. Screen-space anti-diagonal stripes say "water, not measured at this depth" instead.
+    var NO_DATA_WATER = [24, 28, 40, 255];    // hatch ground: cooler and dimmer than the land charcoal
+    var NO_DATA_HATCH = [62, 70, 88, 255];    // hatch stroke
+    var NO_DATA_FLAT = [34, 39, 52, 255];     // area-average of the two, for the coarse drag preview
+    var HATCH_PERIOD = 8;                     // px between stripes, measured along x+y
+    var HATCH_WIDTH = 2;                      // px of stripe — one 2x2 interpolation block
     var MAX_INTENSITY = 25;                   // wind velocity (m/s) at which particle intensity is max (17 in the original; higher cap keeps storm bands from saturating white)
     var VELOCITY_SCALE = 1 / 42000;           // particle screen speed per unit of wind velocity (1/60000 in the original)
     var ZOOM_SPEED_EXPONENT = 0.6;            // 0 = speed grows fully with zoom (frantic close-up), 1 = constant speed at all zooms (sparse short tracks); 0.6 grows gently, ~2× at zoom 6
     var MAX_PARTICLE_STEP = 12;               // px/frame cap on the Euler step — larger steps overshoot tight vortices (empty typhoon eyewall at high zoom); speed still grows with zoom below the cap
+    var MAX_ZOOM = 64;                        // max zoom, ×fitted scale (was 8 — country level; 64 reaches prefecture level; nullschool's absolute extent is [50, 250000] px)
+    var DETAIL_ZOOM = 4;                      // zoom (×fitted scale) beyond which the idle map draws lazily-fetched 10m geometry — 50m lines look coarse past ~8×
 
     var view = {width: window.innerWidth, height: window.innerHeight};
 
@@ -75,31 +86,36 @@
      */
     function windOverlayColor(v, a) {
         var c = extendedSinebowColor(Math.min(v, 100) / 100, a);
-        // Calm-end deep indigo: rgb(4,1,146) composited at OVERLAY_ALPHA over the dark sphere
-        // renders as ≈#070570 on screen (user-tuned for contrast). The curved blend holds the
-        // deep tone through typical 3-7 m/s ocean breeze and releases into the pastelized
-        // scale by 15 m/s, so greens and storm colors are unaffected.
-        var t = Math.pow(Math.min(v / 15, 1), 1.4);
-        c[0] = Math.round((c[0] + (255 - c[0]) * 0.22) * t + 4 * (1 - t));
-        c[1] = Math.round((c[1] + (255 - c[1]) * 0.22) * t + 1 * (1 - t));
-        c[2] = Math.round((c[2] + (255 - c[2]) * 0.22) * t + 146 * (1 - t));
+        // Calm-end indigo: rgb(34,43,178) over the #101018 sphere at OVERLAY_ALPHA renders as
+        // #212D91 at a 3 m/s ocean breeze, matching nullschool's #202D91 sampled there. The
+        // previous royal blue rgb(56,84,199) rendered #2D449D at the same speed — too light
+        // and too cyan. Derived by inverting the composite at that speed rather than by eye:
+        // overlay = (screen − bg·(1−a)) / a, then back out the pastel term at t(3 m/s) = 0.21.
+        // The blend still releases into the pastelized scale by ~11 m/s, so the cyan/green
+        // band and every storm color above it are untouched.
+        var t = Math.pow(Math.min(v / 11, 1), 1.2);
+        c[0] = Math.round((c[0] + (255 - c[0]) * 0.22) * t + 34 * (1 - t));
+        c[1] = Math.round((c[1] + (255 - c[1]) * 0.22) * t + 43 * (1 - t));
+        c[2] = Math.round((c[2] + (255 - c[2]) * 0.22) * t + 178 * (1 - t));
         return c;
     }
 
     /** Near-neutral bright styles for particle trails plus indexFor(mag) to pick a bucket. */
     function windIntensityColorScale(step, maxWind, floor) {
         var result = [];
-        // Brightness floor: 130 keeps slow-wind trails bright (85 in the original); the wave
-        // layer drops it so slow short chop is dim and fast long swell is markedly brighter.
-        floor = floor || 130;
+        // Brightness floor: 155 keeps slow-wind trails bright without bleaching them (85 in the
+        // original, then 130 — fainter than nullschool — and 185, which overshot); the wave
+        // layer drops it so slow short chop is dim and fast long swell is brighter.
+        floor = floor || 155;
         for (var j = floor; j <= 255; j += step) {
             // Near-neutral strokes: the hue comes from the overlay bleeding through the alpha
             // (white over red reads pink, over green pale green). A stronger green tint muddied
-            // the red eyewall into brown. Alpha falls with speed (0.70 slow → 0.50 fast) so calm
-            // regions get bright distinct traces while storm cores can't pile up into mush.
+            // the red eyewall into brown, so the tint sits just off neutral. Alpha falls with
+            // speed (0.80 slow → 0.59 fast) so calm regions get bright distinct traces while
+            // storm cores can't pile up into mush.
             var t = (j - floor) / (255 - floor);
-            var alpha = (0.70 - 0.20 * t).toFixed(2);
-            result.push("rgba(" + Math.round(j * 0.90) + ", " + j + ", " + Math.round(j * 0.92) + ", " + alpha + ")");
+            var alpha = (0.80 - 0.21 * t).toFixed(2);
+            result.push("rgba(" + Math.round(j * 0.92) + ", " + j + ", " + Math.round(j * 0.94) + ", " + alpha + ")");
         }
         result.indexFor = function (m) {
             return Math.floor(Math.min(m, maxWind) / maxWind * (result.length - 1));
@@ -364,7 +380,9 @@
     var animCanvas = d3.select("#animation").node();
     var overlayCtx = overlayCanvas.getContext("2d");
     var animCtx = animCanvas.getContext("2d");
-    var mesh = null;  // coastline/lake geometry, set after topology loads
+    var mesh = null;    // coastline/lake geometry, set after topology loads
+    var mesh10 = null;  // 10m coastline/border/land geometry, lazily fetched past DETAIL_ZOOM
+    var mesh10Loading = false;
 
     // Overlay backing-store pixels per CSS pixel. The data layers stay at 1: the overlay is
     // written with putImageData, which ignores the transform, and their color field is smooth
@@ -394,6 +412,40 @@
         sizeOverlayCanvas();
     }
 
+    // Deep zoom outgrows the 50m geometry (coarse polygonal coastlines past ~8x), so the
+    // first idle draw beyond DETAIL_ZOOM fetches world-atlas countries-10m (~3.7 MB) once
+    // and rebuilds the idle meshes from it. Coastline is the land boundary (islands
+    // included); lakes stay 50m — there is no 10m lakes asset in the bundle.
+    function ensureDetailMesh() {
+        if (mesh10 || mesh10Loading || projection.scale() / initialScale <= DETAIL_ZOOM) return;
+        mesh10Loading = true;
+        fetch("data/countries-10m.json").then(function (r) {
+            if (!r.ok) throw new Error("countries 10m: HTTP " + r.status);
+            return r.json();
+        }).then(function (c10) {
+            var land = topojson.merge(c10, c10.objects.countries.geometries);
+            // world-atlas 10m ships a few rings wound backwards (3 of 4044 merged polygons;
+            // 50m/110m are clean) — d3-geo reads each as "the sphere minus the ring", so the
+            // ocean layers' charcoal land fill flooded the whole globe. A polygon claiming
+            // more than half the sphere (> τ steradians) is one of them: reversing all its
+            // rings restores it while leaving real holes (the Caspian) alone.
+            land.coordinates.forEach(function (poly) {
+                if (d3.geoArea({type: "Polygon", coordinates: poly}) > τ) {
+                    poly.forEach(function (ring) { ring.reverse(); });
+                }
+            });
+            mesh10 = {
+                coast: topojson.mesh(c10, c10.objects.land),
+                borders: topojson.mesh(c10, c10.objects.countries, function (a, b) { return a !== b; }),
+                land: land
+            };
+            drawMap(false);  // repaint the settled view with the sharper lines
+        }).catch(function (err) {
+            console.error(err);
+            mesh10Loading = false;  // allow a retry on the next settled deep-zoom draw
+        });
+    }
+
     // Two layers of line work: sphere fill + graticule live on #map, *below* the color
     // overlay; coastlines/borders/lakes live on #lines, *above* it — under the overlay the
     // 0.72 alpha dimmed outlines to ~30% brightness and they vanished behind the trails.
@@ -401,6 +453,8 @@
     // particle trail that strays past the coastline.
     function drawMap(fast) {
         if (!mesh) return;
+        if (!fast) ensureDetailMesh();
+        var detail = !fast && mesh10 && projection.scale() / initialScale > DETAIL_ZOOM;
 
         function strokeOn(ctx, path, geometry, alpha, width) {
             ctx.beginPath();
@@ -436,12 +490,12 @@
             // The crisp vector edge also crops the ⅓°-grid staircase where sea color
             // bleeds past the coastline.
             lctx.beginPath();
-            lpath(fast ? mesh.landLo : mesh.landHi);
+            lpath(fast ? mesh.landLo : detail ? mesh10.land : mesh.landHi);
             lctx.fillStyle = "#333338";
             lctx.fill();
         }
-        strokeOn(lctx, lpath, fast ? mesh.coastLo : mesh.coastHi, 1.0, 1.6);  // prominent continent outlines
-        strokeOn(lctx, lpath, fast ? mesh.bordersLo : mesh.bordersHi, 0.3, 0.75);
+        strokeOn(lctx, lpath, fast ? mesh.coastLo : detail ? mesh10.coast : mesh.coastHi, 1.0, 1.6);  // prominent continent outlines
+        strokeOn(lctx, lpath, fast ? mesh.bordersLo : detail ? mesh10.borders : mesh.bordersHi, 0.3, 0.75);
         strokeOn(lctx, lpath, fast ? mesh.lakesLo : mesh.lakesHi, 0.4, 0.75);
     }
 
@@ -519,6 +573,16 @@
     }
 
     /**
+     * Anti-diagonal hatch color for dataless water at a screen pixel. Screen space rather than
+     * globe space on purpose: it is a legend for missing data, not a feature of the map, so it
+     * should not rotate or scale with the sphere. The interpolator writes 2x2 blocks, which is
+     * exactly HATCH_WIDTH, so the stripe lands whole regardless of where the block grid starts.
+     */
+    function noDataHatchAt(x, y) {
+        return (x + y) % HATCH_PERIOD < HATCH_WIDTH ? NO_DATA_HATCH : NO_DATA_WATER;
+    }
+
+    /**
      * Asynchronously interpolates the wind grid onto the screen: for every other pixel of the
      * visible globe, invert-project to coordinates, sample the wind, and distort it into a
      * screen-space motion vector. Also paints the overlay color into the mask's image data.
@@ -557,13 +621,18 @@
                                 color = overlayColorAt(λ, φ, scalar);
                             }
                             else if (landFill) {
-                                // Dataless water on an ocean layer (Caspian, coastal grid
-                                // holes): render like the landmass, not as a black hole.
+                                // Dataless water on an ocean layer: shelf seas shallower than
+                                // the layer, the Caspian, coastal grid holes. Hatched below.
                                 color = NO_DATA_GRAY;
                             }
                         }
                     }
                     column[y + 1] = column[y] = wind || NULL_WIND_VECTOR;
+                    // One interception for both dataless paths — the vector branch above and
+                    // overlayColorAt's scalar branch, which returns the same sentinel. Real land
+                    // is hatched here too, then hidden under drawMap's opaque charcoal fill on
+                    // #lines; what survives is water the layer could not measure.
+                    if (color === NO_DATA_GRAY) color = noDataHatchAt(x, y);
                     mask.set(x, y, color).set(x + 1, y, color).set(x, y + 1, color).set(x + 1, y + 1, color);
                 }
             }
@@ -643,6 +712,10 @@
                     var wind = grid.interpolate(coord[0], coord[1]);
                     var color = wind ? overlayColorAt(coord[0], coord[1], wind[2]) :
                         landFill ? NO_DATA_GRAY : null;
+                    // The preview samples every OVERLAY_PREVIEW_STEP px, far coarser than the
+                    // hatch period, so stripes here would alias into moire. Use their area
+                    // average: the drag smudge keeps the same tone the settled draw resolves to.
+                    if (color === NO_DATA_GRAY) color = NO_DATA_FLAT;
                     if (color) {
                         var k = (j * w + i) * 4;
                         data[k] = color[0];
@@ -894,7 +967,11 @@
     // scale to visibly flow, and trail brightness saturates early (0.7 m/s, cambecc's
     // OSCAR value). Matched to nullschool by user comparison: moderately dense,
     // slightly-thicker-than-wind strokes, faster motion (was 1/2500 · ×7 · 1.2 px).
-    var OCEAN_PARTICLES = {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7};
+    // brightnessFloor pins the pre-whitening 130: the currents' strokes were never thinned and
+    // their fast cores already run near-white, so the wind layers' brighter floor would blow
+    // the Kuroshio/Gulf Stream out rather than lift faint trails.
+    var OCEAN_PARTICLES = {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7,
+        brightnessFloor: 130};
     var OCEAN_PLACEHOLDER = "click a point for current speed";
     // Ocean overlays render dimmer than the atmosphere's OVERLAY_ALPHA: the near-black
     // sphere bleeds through, deepening the calm-sea colors so the trails/crests read on top.
@@ -1133,9 +1210,9 @@
         history.replaceState(null, "", "#" + parts.join("&"));
     }
 
-    /** Zoom is clamped to 0.5x-8x of the fitted scale, wheel and pinch alike. */
+    /** Zoom is clamped to 0.5x-MAX_ZOOM of the fitted scale, wheel and pinch alike. */
     function clampScale(scale) {
-        return Math.max(initialScale * 0.5, Math.min(initialScale * 8, scale));
+        return Math.max(initialScale * 0.5, Math.min(initialScale * MAX_ZOOM, scale));
     }
 
     function scheduleRecompute() {
@@ -1321,7 +1398,7 @@
 
         // Pinch zoom: the scale tracks the ratio of finger spread to its value at
         // gesture start, which keeps it absolute — no drift over a long pinch — and
-        // reuses the wheel's clamp so both paths stop at the same 0.5x-8x limits.
+        // reuses the wheel's clamp so both paths stop at the same 0.5x-MAX_ZOOM limits.
         // #display sets touch-action: none, without which the browser would consume
         // the gesture as a page zoom and no touchmove would arrive.
         var node = display.node();
@@ -1425,7 +1502,7 @@
         }
         var zoom = +hash.get("zoom");
         if (zoom > 0) {
-            projection.scale(initialScale * Math.min(8, Math.max(0.5, zoom)));
+            projection.scale(initialScale * Math.min(MAX_ZOOM, Math.max(0.5, zoom)));
         }
         drawScaleBar();
         attachInteraction();

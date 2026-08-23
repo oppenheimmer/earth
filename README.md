@@ -42,8 +42,8 @@ All URL-hash options are read once at load and can be combined with `&`:
 | Hash | Meaning |
 |---|---|
 | `#layer=<id>` | initial layer: `surface`, `1000hpa`, `500hpa`, `10hpa`, `temperature`, `rh`, `dew`, `ocean`, `ocean25`, `ocean110`, `ocean450`, `sst`, `waves`, `daylight`, `nightlights`, `relief` |
-| `#rotate=λ,φ` | initial center, e.g. `#rotate=-128.5,-21.5` (φ clamped to ±90°) |
-| `#zoom=k` | initial zoom, 0.5–8× the fitted scale |
+| `#rotate=λ,φ` | initial d3 **rotation**, which is the negation of the centre — `#rotate=5,-54` centres on 5°W 54°N, the British Isles (φ clamped to ±90°). This is what `replaceState` writes back, so a copied URL round-trips. |
+| `#zoom=k` | initial zoom, 0.5–64× the fitted scale |
 | `#data=<url>` | fetch the weather JSONs *and the RealView imagery* from this base URL instead of local files / R2 |
 | `#relief=k` | relief depth for the Relief layer, 0–1 (default 0.02). Read once at boot; `EarthRenderers.sunlight.setRelief(k)` in the console changes it live |
 
@@ -110,7 +110,8 @@ hours without touching git ([Automated refresh](#automated-refresh)).
         ├── elevation-gebco-*.png  # GEBCO elevation, for Relief — GIT-IGNORED, ditto
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m) — in git
         ├── countries-50m.json   # world-atlas@2 countries topology (borders + land, idle detail)
-        └── countries-110m.json  # world-atlas@2 countries topology (borders + land, while dragging)
+        ├── countries-110m.json  # world-atlas@2 countries topology (borders + land, while dragging)
+        └── countries-10m.json   # world-atlas@2 countries topology (deep-zoom idle detail, lazily fetched past DETAIL_ZOOM)
 ```
 
 The topologies are static assets, not data: they stay in git and always load relative to the
@@ -144,8 +145,10 @@ boot. `public/js/menu.js` only translates clicks into events; the engine owns al
    draw on `#lines` *above* it — beneath the overlay's alpha the outlines dimmed to ~30% and
    vanished behind the trails. Ocean layers additionally fill the merged landmass charcoal
    (`#333338`) on `#lines`, which crops both the grid staircase and any particle that strays
-   past the coast. 110m geometry is used while dragging, 50m when idle; both canvases render at
-   `devicePixelRatio` for crisp lines.
+   past the coast. 110m geometry is used while dragging, 50m when idle — and past `DETAIL_ZOOM`
+   (4×) the first idle draw lazily fetches world-atlas `countries-10m.json` (~3.7 MB, once) and
+   idle draws switch to 10m coastline/borders/landmass, so deep zoom keeps crisp lines (lakes
+   stay 50m). Both canvases render at `devicePixelRatio` for crisp lines.
 3. **Mask** — the sphere is filled with a sentinel color (magenta, unreachable by any of the
    color scales) on an offscreen canvas. Its `imageData` tells the interpolator which pixels are
    on the globe (alpha > 0) and then doubles as the overlay image.
@@ -155,17 +158,21 @@ boot. `public/js/menu.js` only translates clicks into events; the engine owns al
    velocity scale is `bounds.height × layer.velocityScale × (initialScale / scale)^ZOOM_SPEED_EXPONENT`.
    Simultaneously each pixel's overlay color is written into the mask `imageData` by
    `overlayColorAt()`, which dispatches to the layer's scalar colormap, to the flow magnitude
-   itself (`fromMagnitude` layers), or to the default wind-speed sinebow. Work runs in
-   cooperative batches (100 ms work / 25 ms yield) so the UI never freezes, with progress in the
+   itself (`fromMagnitude` layers), or to the default wind-speed sinebow. On an ocean layer a
+   pixel with no value returns a sentinel that the write site swaps for a screen-space diagonal
+   **hatch** (`noDataHatchAt`), which is how water the layer cannot measure — the shelf seas the
+   depth layers stop above, the Caspian, coastal grid holes — is told apart from land; real land
+   is hatched here too and then hidden under step 2's opaque charcoal fill, since `#lines` is the
+   topmost canvas. Work runs in cooperative batches (100 ms work / 25 ms yield) so the UI never freezes, with progress in the
    HUD. On completion, leftover sentinel pixels at the antialiased rim are erased and the
    `imageData` is blitted to `#overlay` with `putImageData`.
 5. **Particle animation** (`#animation`) — `globeBounds().width × multiplier × min(dpr, 2)`
    particles (×0.75 on mobile), each advected by the field vector at its pixel and respawned
    when it ages out or leaves the globe. The canvas is `devicePixelRatio`-scaled and strokes are
-   1.8 *device* px wide (`lineWidth / dpr`) for fine nullschool-like trails. Trails fade via a
+   1.5 *device* px wide (`lineWidth / dpr`) for fine nullschool-like trails. Trails fade via a
    `destination-in` fill of `rgba(0, 0, 0, fade)` per frame over the globe bounds; segments are
    bucketed into near-neutral intensity styles (`INTENSITY_SCALE_STEP` apart, from a brightness
-   floor of 130 to 255 — 13 buckets) with one `beginPath` per bucket. Runs at 25 fps
+   floor of 155 to 255 — 11 buckets) with one `beginPath` per bucket. Runs at 25 fps
    (`setTimeout`, 40 ms), like the original. Two per-layer variants share the loop: long fluid
    streamlines (winds, currents) and the wave layers' `crestLength` mode, which strokes an
    oriented dash *perpendicular* to travel through the segment midpoint. A **streak guard**
@@ -173,7 +180,7 @@ boot. `public/js/menu.js` only translates clicks into events; the engine owns al
    produce at the current zoom (×2 slack) — see [Fixed bugs](#fixed-bugs) for the sizing.
 6. **Interaction** — drag rotates (sensitivity `75 / scale` °/px, φ clamped to ±90°, sub-3 px
    movement stays a click), wheel and two-finger pinch zoom (`exp(-deltaY × 0.0018)` and the
-   finger-spread ratio respectively, both through the same `clampScale()` 0.5×–8× limit), a click
+   finger-spread ratio respectively, both through the same `clampScale()` 0.5×–64× limit), a click
    reads the values under the pointer via `projection.invert` + `interpolate`. Pinch runs *beside*
    `d3.drag` rather than through it: the drag filter rejects any touch event carrying more than one
    touch, and a `pinching` flag — held until every finger lifts — suppresses both the rotate and the
@@ -358,15 +365,20 @@ Top of `wind.js` unless noted; per-layer overrides live in each `LAYERS` entry's
 | `OVERLAY_ALPHA` | 0.72 × 255 | atmosphere overlay opacity (0.4 in the original; near-opaque like nullschool) |
 | `OCEAN_ALPHA` | 0.58 × 255 | ocean/wave overlay opacity — calm sea stays near-black so trails and crests read on top |
 | `MAX_PARTICLE_AGE` | 100 frames | trail lifetime before respawn (waves override: `maxAge` 20) |
-| `PARTICLE_MULTIPLIER` | 3.5 | particles per px of globe width (7 in the original), × min(dpr, 2); low → fewer, thicker, distinct traces (ocean 4, waves 3) |
+| `PARTICLE_MULTIPLIER` | 6 | particles per px of globe width (7 in the original), × min(dpr, 2); matched to nullschool's busier globe by comparison (ocean 4, waves 3) |
 | `PARTICLE_REDUCTION` | 0.75 | particle-count factor on mobile user agents |
-| `PARTICLE_LINE_WIDTH` | 1.8 device px | divided by dpr at stroke time (ocean 1.7, waves 2.5) |
+| `PARTICLE_LINE_WIDTH` | 1.5 device px | divided by dpr at stroke time (ocean 1.7, waves 2.5); below ~1.5 a dpr-1 stroke antialiases across two rows and reads grey |
 | `FRAME_RATE` | 40 ms | ~25 fps animation |
 | `MAX_INTENSITY` | 25 m/s | speed of the brightest trail (17 in the original; a higher cap keeps storm bands from saturating white) — ocean 0.7 m/s, waves 22 s |
 | `VELOCITY_SCALE` | 1/42000 | particle screen speed per m/s, × globe height × zoom factor (ocean 1/1700, waves 1/360000) |
 | `ZOOM_SPEED_EXPONENT` | 0.6 | speed ∝ (initialScale/scale)^0.6 — grows gently with zoom, ~2× at 6× |
 | `MAX_PARTICLE_STEP` | 12 px | cap on the Euler step; a numerical-stability backstop, not a speed model |
-| `INTENSITY_SCALE_STEP` | 10 | brightness step between trail buckets (floor 130 → 13 buckets; waves' `brightnessFloor` 40 → 22) |
+| `MAX_ZOOM` | 64 | zoom ceiling, × the fitted scale (was 8 — country level; 64 reaches prefecture level) |
+| `DETAIL_ZOOM` | 4 | zoom beyond which idle draws use the lazily-fetched 10m geometry |
+| `NO_DATA_WATER` / `_HATCH` | `rgb(24,28,40)` / `rgb(62,70,88)` | ground and stroke of the dataless-water hatch on ocean layers |
+| `NO_DATA_FLAT` | `rgb(34,39,52)` | area-average of the two, used by the coarse drag preview instead of hatching |
+| `HATCH_PERIOD` / `HATCH_WIDTH` | 8 / 2 px | stripe spacing along `x+y`, and stripe width (one 2×2 interpolation block) |
+| `INTENSITY_SCALE_STEP` | 10 | brightness step between trail buckets (floor 155 → 11 buckets; ocean's `brightnessFloor` 130 → 13, waves' 40 → 22) |
 | `MAX_TASK_TIME` / `MIN_SLEEP_TIME` | 100 / 25 ms | field-interpolation work and yield slices |
 | `OVERLAY_PREVIEW_STEP` / `_WAIT` | 5 px / 40 ms | drag-preview sampling stride and throttle |
 | `H` | 3.6e-5 ° (≈4 m) | finite-difference step for the projection distortion |
@@ -381,18 +393,23 @@ See [Changes](#changes) for the order things happened in.
 
 - **Overlay color.** Wind speed maps onto the extended sinebow over 0–100 m/s (hence the
   "0 – 360 km/h" scale label), pastelized 22% toward white so the storm band reads bright
-  salmon/gold instead of brown over the dark map. The calm end is blended toward deep indigo
-  `rgb(4, 1, 146)` with `t = min(v/15, 1)^1.4`, which holds the deep tone through a typical
-  3–7 m/s ocean breeze and releases into the pastel scale by 15 m/s, leaving greens and storm
+  salmon/gold instead of brown over the dark map. The calm end is blended toward indigo
+  `rgb(34, 43, 178)` with `t = min(v/11, 1)^1.2`, which lands on `#212D91` at a 3 m/s ocean
+  breeze — nullschool's blue sampled at the same place is `#202D91`. Two earlier targets
+  bracket it: deep indigo `rgb(4, 1, 146)` read darker and more purple than theirs, royal
+  blue `rgb(56, 84, 199)` read `#2D449D`, too light and too cyan. The blend releases into the
+  pastel scale by 11 m/s so moderate breezes still show the cyan/green band, leaving storm
   colors untouched. The parity measurements that drove this (taken during the parity pass, at 0.5°
   data and 0.5 overlay alpha, so they are the reasoning rather than current readings): brightness
   0.52 against the reference's 0.53, saturation 0.69 vs 0.71, red-tint pixels 360 vs 179 — and 0
   before the resolution upgrade, because the red band lives at ~35–45 m/s and only appears once
   the grid is fine enough to resolve an eyewall peak.
-- **Trail color.** Strokes are almost white on purpose — `rgb(j × 0.90, j, j × 0.92)` with alpha
-  falling 0.70 → 0.50 as speed rises. The hue comes from the overlay bleeding through (pink over
-  a red eyewall, pale green over green); a stronger green stroke tint muddied red zones into
-  brown, and constant high alpha let storm cores pile up into mush.
+- **Trail color.** Strokes are almost white on purpose — `rgb(j × 0.92, j, j × 0.94)` from a
+  brightness floor of 155, with alpha falling 0.80 → 0.59 as speed rises. The hue comes from the
+  overlay bleeding through (pink over a red eyewall, pale green over green); a stronger green
+  stroke tint muddied red zones into brown, and constant high alpha let storm cores pile up into
+  mush. The ocean layers pin `brightnessFloor: 130` (the pre-whitening default): their strokes
+  were never thinned and their fast cores already run near-white.
 - **Trail shape.** Fade 0.97/frame with a 100-frame life gives long fluid streamlines. Two
   de-whitening experiments (brightness ceiling 220, then speed-dependent alpha 0.6 → 0.35) were
   measured and reverted by user preference: the brighter eyewall — ~4.8% white pixels in the
@@ -964,6 +981,80 @@ Each entry is root cause → fix, with how it was verified.
   Local uploads additionally need the `brotli` binary on `PATH`.
 
 ## Changes
+
+### 2026-08-23
+
+- **Second nullschool parity pass**, from a side-by-side screenshot comparison at the same view:
+  - **Calm blue retuned.** The calm-end blend target moved from deep indigo `rgb(4,1,146)` to
+    royal blue `rgb(56,84,199)` and the release curve from `min(v/15,1)^1.4` to `min(v/11,1)^1.2`
+    — nullschool's calm ocean is lighter, less purple, and shows the cyan/green band sooner.
+  - **Busier trails.** `PARTICLE_MULTIPLIER` 3.5 → 6 and `PARTICLE_LINE_WIDTH` 1.8 → 1.4 device
+    px: the earlier fewer-but-thicker tuning read sparser than nullschool's globe.
+  - **Whiter trails**, a follow-up to the thinning above, which cost real peak brightness — a
+    1.4 px stroke at dpr 1 antialiases across two pixel rows at ~70% coverage each, so it reads
+    grey. Brightness floor 130 → 155, stroke alpha 0.70–0.50 → 0.80–0.59, tint `0.90/0.92` →
+    `0.92/0.94` (nearer neutral), and the width given back to 1.5. Bracketed in two passes: a
+    first attempt at floor 185 / alpha 0.92–0.68 was too bright by user judgment, so the shipped
+    values sit midway between it and the faint original. Measured on a calm north-Pacific crop,
+    trail-pixel p90 goes 117.7 (faint) → 126.0 (shipped) → 138.7 (too bright) against an
+    unchanged median, so the lift is the trails rather than the overlay; the typhoon crop's
+    near-white fraction held at 0.2% throughout, so no pile-up mush of the kind an earlier
+    constant-high-alpha attempt hit. Ocean layers pin `brightnessFloor: 130` and keep their look.
+  - **Deep zoom.** `clampScale()` and the `#zoom=` boot clamp now stop at `MAX_ZOOM` (64×, was
+    8×) — prefecture level rather than country level (nullschool's absolute extent is
+    `[50, 250000]` px, several hundred × its fitted scale). Past `DETAIL_ZOOM` (4×) the first
+    idle draw fetches world-atlas `countries-10m.json` (~3.7 MB, once, git-tracked like the
+    other topologies) and idle draws switch to 10m coastline (the land-mesh boundary), borders
+    and landmass fill; dragging keeps the 110m meshes and lakes stay 50m. The 10m merge ships
+    3 of 4044 polygons wound backwards (50m/110m are clean) — d3-geo reads each as the sphere's
+    complement, which flooded the ocean layers' charcoal land fill across the whole globe until
+    a rewind pass (reverse every ring of any polygon whose `d3.geoArea` exceeds τ) restored
+    them; verified numerically (41.31 → 3.61 sr) and visually (Kuroshio at 12×).
+  - **Calm blue, third pass — measured instead of eyeballed.** The royal blue above was still
+    lighter and more cyan than the reference: sampled on calm ocean, nullschool reads `#202D91`
+    where this globe read `#30479D`. Rather than nudge by eye again, the composite was inverted.
+    The on-screen pixel is `overlay·a + bg·(1−a)` with `bg` the `#101018` sphere fill and
+    `a = floor(0.72·255)/255 = 0.7176`, and the overlay itself is `pastel(v)·t + target·(1−t)`.
+    Reproducing the current chain across 0–11 m/s put `#2D449D` at 3 m/s, one step off the
+    sampled `#30479D`, which fixes the speed the comparison was made at; solving the same two
+    equations backwards for `target` at `t(3 m/s) = 0.2103` gives `rgb(34, 43, 178)`, which
+    renders `#212D91` — within one count of the reference on red, exact on green and blue.
+    Green moves most (68 → 45 on screen), which is the whole visible difference: the old target
+    carried a cyan cast into the calm band. Both curves converge to `#2DA181` by 11 m/s, so
+    nothing above the calm band moved.
+  - **Dataless water is hatched instead of painted like land.** The depth layers stop wherever the
+    sea floor rises above them, so at 450 m the whole north-west European shelf — North Sea, Irish
+    Sea, Channel, Kattegat, Baltic — carries no value, and the ocean layers were filling every
+    dataless pixel with `NO_DATA_GRAY`, the same `#333338` as the landmass. The data was right and
+    the picture was wrong: around Denmark only the white coastline distinguished the Baltic from
+    Sweden. Dataless water now gets a screen-space anti-diagonal hatch — ground `rgb(24,28,40)`,
+    stroke `rgb(62,70,88)`, 2 px stripe every 8 px along `x+y` — which reads as "water, not
+    measured at this depth" rather than as ground.
+    - **One interception point.** Two paths produced the flat gray: the vector branch in
+      `interpolateField` and `overlayColorAt`'s scalar branch (SST, wave height). Both return the
+      same `NO_DATA_GRAY` array, so the swap is a single identity test just before the `mask.set`
+      2×2 block write, not a change at each source.
+    - **Land needs no test.** Land is dataless too and gets hatched with everything else, then
+      disappears under the charcoal fill `drawMap` paints on `#lines`, which is the topmost
+      canvas. What survives the stack is exactly the water the layer could not measure — no
+      point-in-polygon work, no second mask.
+    - **The stripe lands whole.** The interpolator writes 2×2 blocks, so `HATCH_WIDTH` is set to
+      the block size; the stripe is one block wide whatever the parity of `bounds.x + bounds.y`,
+      which keeps the density at exactly one block in four. Measured on the North Sea: 1200 ground
+      to 400 stroke pixels, the intended 75/25.
+    - **The drag preview stays flat.** It samples every `OVERLAY_PREVIEW_STEP` (5 px), far coarser
+      than the 8 px hatch period, so stripes there would alias into moire. It uses `NO_DATA_FLAT`,
+      the area-average of the two hatch colors, so the smudge holds the tone the settled draw
+      resolves to.
+    - Verified headless at 7× over the British Isles: land reads a clean flat charcoal (a central-
+      France patch is 1600/1600 land pixels, zero hatch), the shelf seas read hatched, and the
+      Norwegian Trench keeps its data — the boundary follows real bathymetry. The Surface layer is
+      unchanged, having data everywhere the ocean is, and the atmosphere layers never reach the
+      branch at all (`landFill` is false, so their dataless pixels stay transparent).
+  - **`#rotate=` documented correctly.** The hash table called it the "initial center"; it is the
+    d3 rotation, which is the *negation* of the centre (`projection.rotate([-home[0], -home[1], 0])`
+    at boot). Caught by using the documented form to aim the verification screenshot at the British
+    Isles and landing in the Southern Ocean instead — `#rotate=-5,54` centres on 54°S, not 54°N.
 
 ### 2026-08-22
 
