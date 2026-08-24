@@ -3,7 +3,10 @@ node_modules
 .DS_Store
 .claude/settings.local.json
 CLAUDE.md
+AGENTS.md
 __pycache__/
+# wrangler's local cache: holds the Cloudflare account id and OAuth state.
+worker/.wrangler/
 .env/
 # Weather data is not versioned: refresh scripts write it here for local dev,
 # scripts/upload_data.sh ships it to the Cloudflare R2 bucket for production.
@@ -12,10 +15,7 @@ public/data/current-*.json
 # than code — same split (fetch_textures.sh writes them here, upload_textures.sh
 # ships them to R2). The vector topologies below stay in git.
 public/data/bluemarble-*.jpg
+public/data/bluemarble-*.webp
 public/data/blackmarble-*.jpg
 public/data/elevation-*.png
 .vscode/
-AGENTS.md
-# Deployment runbook: kept local only (holds the live bucket URL + ops notes),
-# deliberately out of the public repo.
-earth-vercel-deploy.md

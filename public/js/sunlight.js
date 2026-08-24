@@ -34,18 +34,67 @@
     var BACKDROP_BLUE = 0.6;        // blue fraction subtracted to isolate lights — see shade()
     var TEXTURE_MAX_WIDTH = 5400;   // decode cap (halved on mobile): 5400 × 2700 RGBA is 58 MB
     var PREVIEW_STEP = 4;           // drag preview: sample every Nth CSS px, upscaled with smoothing
-    // Deep zoom on the imagery. The 5400-wide composites carry 15 px per degree; the globe
-    // renders scale·π/180 px per degree at its centre, so on a 790 px-tall viewport the
-    // texture runs out of detail at 2.6× and on a 1080 px one at 1.9×. Past DETAIL_ZOOM the
-    // 21600-wide masters (60 px/deg) take over — but only over the visible cap, since the
-    // whole master is 933 MB as RGBA and unusable as one readback. See ensureDetail().
-    var DETAIL_ZOOM = 2.5;          // ×fitted scale past which the high-res masters engage. 2.5 and
-                                    // not 3 because the 5400 texture runs out at 2.59 on a 790 px
-                                    // viewport: swapping at 3 would leave a band of visible softness
-                                    // just below the threshold, which is where it was first noticed.
-    var DETAIL_MAX_CROP = 3072;     // px cap per axis on the cropped readback (3072² RGBA = 38 MB)
+    // Deep zoom on the imagery. The composites come on three grids, and each carries twice the
+    // detail of the one below it: 15 px/deg at 5400, 30 at 10800, 60 at 21600. Only the first is
+    // decoded whole — the 21600 is 933 MB as RGBA — so past the base plate the layers switch to a
+    // *crop* of a master over the visible cap. See ensureDetail().
+    //
+    // Which grid a view earns used to be two zoom constants, DETAIL_ZOOM = 2.5 and MID_ZOOM = 5,
+    // read off `scale · π/180` against those px/deg figures. Both were wrong in the same way: that
+    // expression is CSS px, and render() draws at `scale · overlayScale` backing-store px. On a
+    // Retina display the imagery is asked for twice the detail the arithmetic assumed and every
+    // crossover arrives at half the zoom quoted — the 5400 plate running out at 1.3× rather than
+    // 2.6×. The fixed numbers also could not follow the viewport: the same comment noted the
+    // crossover falls to 1.9× on a 1080 px-tall window and left the constant at 2.5 regardless.
+    //
+    // So the thresholds are gone and the two questions are asked directly, of the numbers that
+    // actually decide them: worthCropping() for whether to cut at all, chooseMaster() for which
+    // grid to cut from. Both read screenDetail(), which carries overlayScale and the viewport with
+    // it, so a Retina laptop and a 4K panel now get their own crossovers rather than a 790 px
+    // CRT's. What the old constants encoded is preserved as a consequence rather than a constant:
+    // on a 1600×900 CSS-pixel display the crop still engages around 2.4× and the master around 5×.
+    //
+    // The mid tier costs ~3.5 MB against the master's ~23 (means over the twelve monthly
+    // composites; both vary by season). A view that jumps straight past the master's threshold
+    // never fetches the mid tier at all; one that pauses on the way fetches both, which is the
+    // price of not guessing where a drag is going. Checked against the master at 3.5× on a
+    // 1200×800 viewport: SSIM 0.967 overall, and a Himalaya crop of the two is indistinguishable
+    // -- same lakes, same snow line -- for 3.0 MB against 21.3, on the August composite.
+    var MID_GRID = 10800;           // the mid tier's grid, px across; register() builds the URL from it
+    var HI_GRID = 21600;            // the deep master's grid, likewise
+    // The size of the cropped readback, as the edge of a square of equivalent area — and the
+    // constraint that actually limits deep zoom, because over most of the range it is this and not
+    // the tier that decides what reaches the screen. Measured on a 1600×900 viewport: at 3.5× the
+    // window is 103.7° across, the 21600 master offers 6221 px of it, and the old 3072 took half.
+    // Below ~3.8× that clamp was tighter than the *mid* tier's own 10800, so the mid tier and the
+    // master produced byte-identical crops and the extra 20 MB of master bought nothing at all.
+    //
+    // Raising it to 4096 is worth ~30% more px/deg through the 4–6× band where the softness shows.
+    // Not higher: this is getImageData into the JS heap, not a GPU allocation, and it is cut twice
+    // on Night Lights (the day and night planes). 4096² RGBA is 67 MB a plane against 3072²'s 38;
+    // 8192² would be 268 MB a plane and 537 MB for the pair, on top of the retained 21600 decode,
+    // and the readback — already a few hundred ms at 3072 — scales with area, not with the axis.
+    // Zooming back out releases it, so this is a ceiling on the deep-zoom view, not a resting cost.
+    //
+    // It is the *area* that is fixed, not each axis; cropSize() decides how to spend it, and the
+    // two are the same square only when the window is as wide as it is tall.
+    var DETAIL_MAX_CROP = 4096;
+    var DETAIL_BUDGET = DETAIL_MAX_CROP * DETAIL_MAX_CROP;   // the cap is an area, see cropSize()
+    // Per-axis ceiling, keeping a degenerate window from cutting a one-pixel strip. Memory is
+    // bounded by DETAIL_BUDGET above and not by this — a 16384 × 1024 crop costs the same 67 MB as
+    // a 4096² one — so raising it to 16384 looks free, and on paper it pays: above ~65°N past 5×
+    // the demand split wants a wider strip than 8192 and clamping it costs 12–18% of plateDetail().
+    //
+    // Measured, it does not pay. Rendered headless at 70°N/7×, 68°N/6° and 67°N/5×, the wider strip
+    // came back with 4–6% more east-west detail and 7–12% *less* north-south, for a net loss in
+    // every one. plateDetail() maximises the weaker axis, and up there that is not the axis the eye
+    // is reading: worstLat() scores longitude at the most equatorward latitude in the window, which
+    // near a pole is the foreshortened rim of the disc rather than the middle of the screen, so the
+    // split is already leaning further into longitude than the view wants. The ceiling was quietly
+    // correcting for that. It stays at 8192 until the weighting it is compensating for is fixed.
+    var DETAIL_MAX_AXIS = 8192;
     var DETAIL_MARGIN = 0.18;       // crop overshoot past the visible cap, as a fraction of span
-    var DETAIL_REZOOM = 1.6;        // re-cut the crop once zoom has grown this much since it was cut
+    var DETAIL_REGAIN = 1.15;       // re-cut only when a fresh crop would carry this much more detail
     var RELIEF_STRENGTH = 0.02;     // terrain relief depth — see buildRelief()
     var RELIEF_SUN_REF = Math.sin(35 / (180 / Math.PI));   // taper below this sun elevation
     var RELIEF_CLAMP = 0.62;        // relief may brighten or darken daylight by at most this
@@ -90,11 +139,12 @@
     var terrain = null;             // elevation-gradient sampler, or null before it loads
     var baseDay = null;             // the 5400 samplers, kept as the fallback outside the crop
     var baseNight = null;
+    var midDay = null;              // 10800 day master — the tier between base and hiDay
     var hiDay = null;               // high-res URLs for the displayed layer, or null
     var hiNight = null;
     var hiRelief = null;
     var images = {};                // decoded high-res <img> by URL, held for re-cropping
-    var detail = null;              // {win, zoom, day, night} — the current high-res crop
+    var detail = null;              // {win, zoom, master, day, night} — the current high-res crop
     var detailBusy = false;         // a fetch or a re-cut is in flight
     var detailFailed = false;       // one failure is enough; do not re-request 21 MB on every settle
     var terrainHi = false;          // the 2700 elevation map has replaced the 1350 one
@@ -161,6 +211,11 @@
         canvas.width = width;
         canvas.height = height;
         var ctx = canvas.getContext("2d", {willReadFrequently: true});
+        // Only bites where the cap above actually shrinks the source, which is the mobile
+        // half-width path: there the browser's default "low" scaler aliases a 2:1 downscale it
+        // has no need to. Free everywhere else, since desktop draws 5400 → 5400 at 1:1.
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
         ctx.drawImage(image, 0, 0, width, height);
         var data = ctx.getImageData(0, 0, width, height).data;
         var last = height - 1;
@@ -193,7 +248,7 @@
     //
     // The masters are 21600×10800 (Blue Marble) and 13500×6750 (Black Marble). Neither can go
     // through buildTexture: 933 MB and 364 MB of RGBA respectively, for a globe that shows at
-    // most a hemisphere and, past DETAIL_ZOOM, far less. So the <img> is decoded once and kept,
+    // most a hemisphere and, once worthCropping() engages, far less. So the <img> is kept decoded,
     // and only the window the camera can actually see is read back — measured in Chromium, a
     // full-resolution cropped drawImage off the 21600 master costs 4 ms and the getImageData
     // that follows a few hundred, once per settle rather than per frame.
@@ -228,9 +283,19 @@
      * the same formula a geographic bounding box uses.
      */
     function capHalfSpan(cap) {
+        // Strictly inside, not touching. visibleCap() clamps its asin argument at 1, so any view
+        // whose viewport diagonal overshoots the globe reports r = 90° exactly — which is most of
+        // the range below ~2.4× — and `>= 90` sent every one of them down the full-circle path.
+        // A hemisphere centred on the equator covers λc ± 90 at *every* latitude, so 180° was the
+        // right answer and 360° was double. That doubling landed on the widest windows there are,
+        // where cropSize() has the least room to absorb it: it halved the crop's longitude
+        // resolution across the whole low-zoom band, which is exactly the band a Retina display
+        // needs the crop in. A cap that contains a pole in its interior is still 360°.
+        if (Math.abs(cap.φc) + cap.r > 90 + 1e-9) return null;
+        // |φc| ≤ 90 - r now, so cos φc ≥ sin r and the ratio cannot exceed 1; min() is arithmetic
+        // safety at the boundary, not a clamp that changes an answer.
         var cosφ = Math.cos(cap.φc / DEG), sinR = Math.sin(cap.r / DEG);
-        if (Math.abs(cap.φc) + cap.r >= 90 || cosφ <= sinR) return null;
-        return Math.asin(sinR / cosφ) * DEG;
+        return Math.asin(Math.min(1, sinR / cosφ)) * DEG;
     }
 
     /** The lon/lat window to cut, the visible cap plus DETAIL_MARGIN on each span. */
@@ -263,22 +328,101 @@
         return inWindow(win, cap.λc - half) && inWindow(win, cap.λc + half);
     }
 
+    /** The whole plate as a window: what the base texture covers, for comparison against a crop. */
+    var GLOBE = {west: -180, south: -90, north: 90, spanλ: 360, spanφ: 180};
+
+    /**
+     * px per degree of *arc* that an equirectangular plate of w × h carries over `win`.
+     *
+     * Arc, not longitude, because arc is the unit the screen asks in while degrees of longitude
+     * are the unit the array is indexed in, and the two differ by cos(φ). The longitude axis is
+     * therefore divided by the largest cos(φ) the window contains — the latitude where its columns
+     * are stretched widest on screen, and so where the plate is thinnest against what a viewer can
+     * actually resolve. Whichever axis is worse is the one that decides.
+     */
+    function plateDetail(win, w, h) {
+        return Math.min(w / win.spanλ / Math.cos(worstLat(win) / DEG), h / win.spanφ);
+    }
+
+    /**
+     * The latitude in a window where a degree of longitude is widest on screen, and so where the
+     * crop's columns are stretched thinnest: the equator if the window straddles it, otherwise
+     * whichever edge is nearer to it.
+     */
+    function worstLat(win) {
+        return win.south <= 0 && win.north >= 0
+            ? 0 : Math.min(Math.abs(win.south), Math.abs(win.north));
+    }
+
+    /**
+     * How many px to spend on each axis of a crop of `win` cut from a W0 × H0 master.
+     *
+     * The budget is an *area* — DETAIL_MAX_CROP² of readback per plane — split between the axes
+     * in the ratio the screen is actually asking in, rather than capped at the same number on
+     * each. Near the equator those are the same thing. Near a pole they are not, because
+     * cropWindow() has to take all 360° of longitude as soon as the visible cap touches the pole,
+     * and an equal per-axis cap then starves the wide axis to pay the narrow one. Measured at
+     * 51.5°N and 3× on a 1600×900 viewport, where the window is 360° × 109°:
+     *
+     *     equal cap    4096 × 3276    11.4 px/deg lon,  30.0 px/deg lat
+     *     by demand    7437 × 2256    20.7 px/deg lon,  20.7 px/deg lat
+     *
+     * The base texture carries 15 px/deg in both. So the old split was below it in the axis the
+     * viewer is looking across and twice it in the axis they are not — the imagery lost real
+     * east-west detail at every populated northern latitude, and spent it on north-south detail
+     * no screen was asking for. The same readback, reapportioned, clears the base plate in both.
+     * Measured headless at 51.5°N and 3×: east-west detail ×1.42, north-south ×0.99.
+     *
+     * The ratio is spanλ·cos(φ) against spanφ, both degrees of arc — the very cos(φ) that makes a
+     * degree of longitude cheap up there, now spending the pixels rather than merely excusing
+     * them. cos(φ) is taken at worstLat(), so a window that reaches down to the equator (this one
+     * does: it runs from 19°S to the pole) gets no discount, which is why the split is as wide as
+     * it is.
+     */
+    function cropSize(win, W0, H0) {
+        var sw = win.spanλ / 360 * W0, sh = win.spanφ / 180 * H0;
+        var w, h;
+        if (sw * sh <= DETAIL_BUDGET) {                  // fits whole: no downscale to apportion
+            w = sw;
+            h = sh;
+        } else {
+            var aspect = win.spanλ * Math.cos(worstLat(win) / DEG) / win.spanφ;
+            w = Math.min(sw, Math.sqrt(DETAIL_BUDGET * aspect), DETAIL_MAX_AXIS);
+            h = Math.min(sh, Math.sqrt(DETAIL_BUDGET / aspect), DETAIL_MAX_AXIS);
+            // Whichever axis hit its natural size first leaves slack; hand it to the other.
+            h = Math.min(sh, DETAIL_BUDGET / w, DETAIL_MAX_AXIS);
+            w = Math.min(sw, DETAIL_BUDGET / h, DETAIL_MAX_AXIS);
+        }
+        return {w: Math.max(2, Math.round(w)), h: Math.max(2, Math.round(h)), sw: sw, sh: sh};
+    }
+
+    /**
+     * px per degree of arc the screen is asking for at the globe's centre.
+     *
+     * `overlayScale()` is the term every crossover in this file used to be missing. render() draws
+     * at `projection.scale() · overlayScale` backing-store px, so on any display where that is 2 —
+     * every Retina laptop — the imagery is asked for twice the detail the CSS-pixel arithmetic in
+     * the old DETAIL_ZOOM/MID_ZOOM constants assumed, and each grid runs out at half the zoom they
+     * were set to. worthCropping() and chooseMaster() read this instead of those constants.
+     */
+    function screenDetail() {
+        return engine.projection.scale() * (Math.PI / 180) * engine.overlayScale();
+    }
+
     /**
      * Reads one lon/lat window out of a decoded equirectangular master into a bilinear sampler,
-     * downscaling to DETAIL_MAX_CROP per axis if the window is wider than the cap allows.
+     * downscaling to fit the readback budget if the window carries more pixels than it allows.
      *
-     * The cap is not a quality compromise at the zooms that matter. At 3× the visible window is
-     * ~118° across, so 3072 px is 26 px/deg against the ~17 the screen resolves; by 6× the
-     * window has shrunk inside the cap and the crop is the master's own 60 px/deg. The two axes
-     * are capped independently, which is what keeps polar views honest: near a pole the window
-     * spans all 360° of longitude but only a narrow latitude band, and longitude is exactly
-     * where degrees are cheap.
+     * The two axes are sized by cropSize(), which splits one area budget between them by demand
+     * rather than capping each at the same number — see there for why a polar window makes those
+     * two very different things. At 3× the visible window is ~127° across, and the budget puts
+     * 30 px/deg on it against the ~20 a CSS-pixel screen resolves and the ~40 a Retina one does,
+     * which is where the headroom raising the cap bought actually goes.
      */
     function buildCrop(image, win) {
         var W0 = image.naturalWidth, H0 = image.naturalHeight;
-        var sw = win.spanλ / 360 * W0, sh = win.spanφ / 180 * H0;
-        var w = Math.max(2, Math.min(Math.round(sw), DETAIL_MAX_CROP));
-        var h = Math.max(2, Math.min(Math.round(sh), DETAIL_MAX_CROP));
+        var size = cropSize(win, W0, H0);
+        var sw = size.sw, sh = size.sh, w = size.w, h = size.h;
         var canvas = document.createElement("canvas");
         canvas.width = w;
         canvas.height = h;
@@ -351,24 +495,115 @@
     }
 
     /**
+     * Is a crop worth cutting for this window at all — the question DETAIL_ZOOM used to answer?
+     *
+     * Two things have to hold. The screen must be asking for more than the base plate carries,
+     * which on a Retina display happens at half the zoom the old constant assumed. And a crop of
+     * *this* window must be able to deliver meaningfully more than the base plate, which is not
+     * automatic: below ~2.4× the visible cap is the whole hemisphere, the window is as wide as the
+     * plate itself, and one budget's worth of readback spread over it comes back at 21 px/deg
+     * against the plate's 15 — worth having, but only just, and not worth 3.5 MB if the screen is
+     * only asking for 16. Clamping the crop's score at what the screen wants is what makes that
+     * second test bite; DETAIL_REGAIN sets how much better than the plate is worth the fetch.
+     */
+    function worthCropping(win) {
+        var base = plateDetail(GLOBE, baseDay.width, baseDay.height);
+        var want = screenDetail();
+        if (want <= base) return false;                  // the base plate still resolves the screen
+        var size = cropSize(win, HI_GRID, HI_GRID / 2);  // the best any crop could do here
+        return Math.min(plateDetail(win, size.w, size.h), want) >= base * DETAIL_REGAIN;
+    }
+
+    /**
+     * Which grid to cut this window from — the question MID_ZOOM used to answer, and got wrong in
+     * a way no zoom threshold could have got right.
+     *
+     * The master is only worth its ~23 MB when a crop cut from it actually comes back sharper than
+     * one cut from the 10800 tier. Two separate things stop that being true, and neither is a
+     * function of zoom alone. The readback budget clamps both cuts to the same size whenever the
+     * window is wide — below ~3.8× on a 1600×900 viewport the two crops come back byte-identical,
+     * and MID_ZOOM = 5 was fetching the master for the last of that band to no effect whatsoever.
+     * And past the point where the screen is satisfied, extra px/deg in the plate are extra px/deg
+     * nobody can see. Asking cropSize() both questions settles both.
+     *
+     * The comparison is axis by axis, and must be: plateDetail() reports a plate's *weakest* axis,
+     * which is the right answer for how sharp a crop looks and the wrong one for whether one crop
+     * beats another. At 68°N and 6× both grids pin the longitude axis to DETAIL_MAX_AXIS, so their
+     * weakest axes are identical and a min() comparison called it a tie — while the master was in
+     * fact carrying a quarter more latitude detail (37.8 px/deg against 30.0). Cutting the cheap
+     * tier there was a visible regression on Siberian river country, caught headless at ×0.50.
+     *
+     * A per-axis *loss* is not disqualifying, and treating it as one cost 70°N at 7× a fifth of its
+     * detail. Near a pole the mid tier's crop fits the budget whole and spends the slack on
+     * longitude, while the master's has to be scaled down to fit — so the master trades longitude
+     * for latitude. That is an artefact of how cropSize() spends the budget, not of the imagery:
+     * the master is never the poorer source. So the only question asked is whether it wins some
+     * axis by enough to be worth fetching.
+     */
+    function chooseMaster(win) {
+        if (!midDay) return hiDay;
+        if (!hiDay) return midDay;
+        var want = screenDetail();
+        var mid = cropSize(win, MID_GRID, MID_GRID / 2);
+        var hi = cropSize(win, HI_GRID, HI_GRID / 2);
+        // Longitude is compared in degrees of arc, as plateDetail() does, so the two axes are
+        // scored in the same unit; latitude already is.
+        var lon = axisGain(hi.w, mid.w, win.spanλ * Math.cos(worstLat(win) / DEG), want);
+        var lat = axisGain(hi.h, mid.h, win.spanφ, want);
+        return lon >= DETAIL_REGAIN || lat >= DETAIL_REGAIN ? hiDay : midDay;
+    }
+
+    /** How much more one grid resolves than another along one axis, capped at what the screen shows. */
+    function axisGain(hiPx, midPx, span, want) {
+        return Math.min(hiPx / span, want) / Math.min(midPx / span, want);
+    }
+
+    /**
+     * Should the crop be re-cut for the view it now faces? Compares what it carries against what
+     * the screen is asking for, rather than how far the zoom has travelled since it was cut.
+     *
+     * The ratio this replaces — re-cut once zoom had grown 1.6× — was wrong at both ends. A crop
+     * cut at 2.5× stayed in service to 3.99×, carrying 17 px/deg against the 26 the screen wanted;
+     * and above ~6.5×, where the crop is already at the master's native 60 px/deg and a re-cut
+     * cannot add a pixel, it went on paying the readback anyway. Both numbers are available, so
+     * this asks them directly instead of guessing from the zoom.
+     *
+     * DETAIL_REGAIN is what stops the second failure mode coming back as a loop: once the master
+     * itself is the limit, a fresh cut scores what the current one already does, and the re-cut is
+     * declined rather than repeated every settle.
+     */
+    function worthRecutting(cap) {
+        var have = plateDetail(detail.win, detail.day.width, detail.day.height);
+        if (have >= screenDetail()) return false;        // still finer than the screen resolves
+        var win = cropWindow(cap), size = cropSize(win, detail.W, detail.H);
+        return plateDetail(win, size.w, size.h) >= have * DETAIL_REGAIN;
+    }
+
+    /** Zoomed back out, or into a window a crop cannot improve: release ~70 MB and show the base. */
+    function dropDetail() {
+        detail = null;
+        day = baseDay;
+        night = baseNight;
+    }
+
+    /**
      * Called from render(), which the engine only reaches once a gesture has settled — the same
      * discipline the 10m coastline fetch uses. Nothing here runs per drag frame: the preview
      * keeps sampling the 5400 texture, and the sharper pixels arrive on the settle after.
      */
     function ensureDetail() {
-        if (!hiDay || detailFailed || engine.isMobile()) return;   // phones keep the 5400 masters
-        if (engine.zoom() <= DETAIL_ZOOM) {
-            if (detail) {                      // zoomed back out: drop ~40 MB of crop
-                detail = null;
-                day = baseDay;
-                night = baseNight;
-            }
+        if ((!hiDay && !midDay) || detailFailed || engine.isMobile()) return;   // phones keep the 5400 masters
+        var cap = visibleCap();
+        if (!worthCropping(cropWindow(cap))) {
+            if (detail) dropDetail();      // zoomed back out, or somewhere a crop cannot help
             return;
         }
         if (detailBusy) return;
-        var cap = visibleCap();
-        var zoom = engine.zoom();
-        if (detail && covers(detail.win, cap) && zoom < detail.zoom * DETAIL_REZOOM) return;
+        var master = chooseMaster(cropWindow(cap));
+        // A tier change re-cuts even when the existing crop still covers the view: the
+        // point of moving up a grid is that the same window now comes from sharper pixels.
+        if (detail && detail.master === master &&
+            covers(detail.win, cap) && !worthRecutting(cap)) return;
         detailBusy = true;
         // The three assets fail independently. Only the Blue Marble master is load-bearing —
         // a missing night or elevation twin should cost that layer its own upgrade, not the
@@ -377,19 +612,27 @@
             return p ? p.catch(function (err) { console.error(err); return null; }) : Promise.resolve(null);
         }
         Promise.all([
-            decode(hiDay),
+            decode(master),
             optional(hiNight ? decode(hiNight) : null),
             optional(hiRelief && !terrainHi ? texture(hiRelief, buildRelief) : null)
         ]).then(function (im) {
             var win = cropWindow(visibleCap());
-            detail = {
-                win: win,
-                zoom: engine.zoom(),
-                day: buildCrop(im[0], win),
-                night: im[1] ? buildCrop(im[1], win) : null
-            };
-            day = layered(baseDay, detail.day);
-            night = baseNight && detail.night ? layered(baseNight, detail.night) : baseNight;
+            // Asked again of the window as it stands now: a view that zoomed back out while this
+            // was in flight must not have a crop installed over the plate that already beats it.
+            if (!worthCropping(win)) {
+                dropDetail();
+            } else {
+                detail = {
+                    win: win,
+                    master: master,
+                    W: im[0].naturalWidth,      // the master's own grid, for worthRecutting()
+                    H: im[0].naturalHeight,
+                    day: buildCrop(im[0], win),
+                    night: im[1] ? buildCrop(im[1], win) : null
+                };
+                day = layered(baseDay, detail.day);
+                night = baseNight && detail.night ? layered(baseNight, detail.night) : baseNight;
+            }
             if (im[2]) terrain = im[2];   // relief upgrades whole; it is small enough not to crop
             terrainHi = true;             // attempted — succeeded or not, do not ask again
             detailBusy = false;
@@ -429,6 +672,11 @@
         canvas.width = width;
         canvas.height = height;
         var ctx = canvas.getContext("2d", {willReadFrequently: true});
+        // Matters more here than it does for colour: what this plate feeds is a *derivative*, and
+        // the default "low" scaler's aliasing lands as noise in the exact quantity the shading
+        // consumes — the same argument that makes the offline resample lanczos and the file a PNG.
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
         ctx.drawImage(image, 0, 0, width, height);
         var src = ctx.getImageData(0, 0, width, height).data;
         var n = width * height, last = height - 1;
@@ -862,10 +1110,18 @@
             // pick — it puts the northern snow line, the Sahel's green-up and the Antarctic
             // sea ice where they belong for the season on screen, at no extra cost.
             var month = (new Date().getUTCMonth() + 101).toString().slice(1);
-            var blueMarble = dataRoot + "bluemarble-2004" + month + ".jpg";
-            // The deep-zoom masters, fetched only if the view closes past DETAIL_ZOOM. Each
-            // name carries its grid, as the R2 objects are immutable and served forever.
-            var blueMarbleHi = dataRoot + "bluemarble-2004" + month + "-21600.jpg";
+            // WebP, not the JPEG NASA publishes: half the bytes at SSIM 0.985 against it,
+            // and these pixels are only ever sampled as colour. The night lights and the
+            // elevation map stay in their own formats — their pixels are read back through
+            // extractions that lossy WebP measurably poisons (see fetch_textures.sh).
+            var blueMarble = dataRoot + "bluemarble-2004" + month + ".webp";
+            // The deep-zoom masters, fetched only once worthCropping() says a crop is worth it.
+            // Each name carries its grid, as the R2 objects are immutable and served forever, so
+            // the URLs are built from the same MID_GRID/HI_GRID that chooseMaster() reasons about
+            // and the two cannot drift. Two tiers rather than one: see chooseMaster(). The 21600
+            // stays JPEG because WebP cannot exceed 16383 px on an axis.
+            var blueMarbleMid = dataRoot + "bluemarble-2004" + month + "-" + MID_GRID + ".webp";
+            var blueMarbleHi = dataRoot + "bluemarble-2004" + month + "-" + HI_GRID + ".jpg";
             var credit = "NASA Blue Marble NG &nbsp;|&nbsp; MODIS / Terra, NASA Earth Observatory";
             var placeholder = "click a point for sun elevation";
             // Relief is its own layer rather than a treatment applied to the other two:
@@ -873,14 +1129,14 @@
             // the camera never saw belongs in a layer a viewer chooses on purpose. The three
             // share one Blue Marble URL, so switching between them decodes nothing.
             return {
-                "daylight": {texture: blueMarble, textureHi: blueMarbleHi, label: "Daylight",
+                "daylight": {texture: blueMarble, textureMid: blueMarbleMid, textureHi: blueMarbleHi, label: "Daylight",
                     credit: credit, placeholder: placeholder},
-                "nightlights": {texture: blueMarble, textureHi: blueMarbleHi,
+                "nightlights": {texture: blueMarble, textureMid: blueMarbleMid, textureHi: blueMarbleHi,
                     night: dataRoot + "blackmarble-2016-5400.jpg",
                     nightHi: dataRoot + "blackmarble-2016-13500.jpg",
                     label: "Night Lights", placeholder: placeholder,
                     credit: credit + " &nbsp;+&nbsp; VIIRS Black Marble 2016"},
-                "relief": {texture: blueMarble, textureHi: blueMarbleHi,
+                "relief": {texture: blueMarble, textureMid: blueMarbleMid, textureHi: blueMarbleHi,
                     relief: dataRoot + "elevation-gebco-1350.png",
                     reliefHi: dataRoot + "elevation-gebco-2700.png",
                     label: "Relief", placeholder: placeholder,
@@ -904,6 +1160,7 @@
             detailBusy = false;
             detailFailed = false;
             terrainHi = false;
+            midDay = layer.textureMid || null;
             hiDay = layer.textureHi || null;
             hiNight = layer.nightHi || null;
             hiRelief = layer.reliefHi || null;

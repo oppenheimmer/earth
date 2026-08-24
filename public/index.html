@@ -5,6 +5,97 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <title>earth</title>
     <meta name="description" content="Animated global wind visualization — a minimal replica of earth.nullschool.net's colorful wind mode">
+    <!-- The weather JSONs and the RealView imagery come from the Worker in worker/,
+         a different origin; warm the
+         connection before anything asks for one. Harmless when #data= or localhost sends
+         DATA_ROOT somewhere else — an unused preconnect is dropped after a few seconds. -->
+    <link rel="preconnect" href="https://earth-data.globe-climatesim.workers.dev" crossorigin>
+
+    <!-- Boot prefetch, and the reason it is inline rather than a file: the first weather
+         fetch is 1.5-2 MB from a second origin, and it used to be issued only after d3 and
+         wind.js had downloaded, parsed, and resolved the three topologies — some 400 ms with
+         the network sitting idle. Firing it during HTML parse removes that wait, which an
+         external <script> could not, since it would first cost the very round trip this
+         saves. DATA_ROOT's resolution and the layer → file map are therefore duplicated
+         from wind.js; checkPreloadMap() there asserts the two still agree, and a miss costs
+         nothing anyway — loadLayer() falls back to fetching exactly as it always did. -->
+    <script>
+    (function () {
+        var R2 = "https://earth-data.globe-climatesim.workers.dev/";
+        var hash = new URLSearchParams(location.hash.slice(1));
+        var override = hash.get("data");
+        var root = override ? override.replace(/\/?$/, "/")
+            : (/^(localhost|127\.|\[::1\])/.test(location.hostname) || location.protocol === "file:")
+                ? "data/" : R2;
+
+        var WIND = "current-wind-surface-level-gfs-0.25.json";
+        var CUR = "current-ocean-currents-cmems-0.25.json";
+        // layer id → [flow file, scalar file?], mirroring LAYERS in wind.js.
+        var FILES = {
+            "surface":     [WIND],
+            "1000hpa":     ["current-wind-1000hpa-gfs-0.25.json"],
+            "500hpa":      ["current-wind-500hpa-gfs-0.25.json"],
+            "10hpa":       ["current-wind-10hpa-gfs-0.25.json"],
+            "temperature": [WIND, "current-temp-surface-level-gfs-0.25.json"],
+            "rh":          [WIND, "current-rh-surface-level-gfs-0.25.json"],
+            "dew":         [WIND, "current-dewpoint-surface-level-gfs-0.25.json"],
+            "ocean":       [CUR],
+            "ocean25":     ["current-ocean-currents-25m-cmems-0.25.json"],
+            "ocean110":    ["current-ocean-currents-110m-cmems-0.25.json"],
+            "ocean450":    ["current-ocean-currents-450m-cmems-0.25.json"],
+            "sst":         [CUR, "current-ocean-temp-cmems-0.25.json"],
+            "waves":       ["current-ocean-waves-gfswave-0.25.json",
+                            "current-ocean-wave-height-gfswave-0.25.json"]
+        };
+        // The RealView layers load images, not JSON. All three share one Blue Marble month
+        // (sunlight.js picks it the same way); warming the image cache is enough, because
+        // its texture() creates an <img> with the same crossOrigin and hits the same entry.
+        var mm = (new Date().getUTCMonth() + 101).toString().slice(1);
+        var DAY = "bluemarble-2004" + mm + ".webp";
+        var IMAGES = {
+            "daylight":    [DAY],
+            "nightlights": [DAY, "blackmarble-2016-5400.jpg"],
+            "relief":      [DAY, "elevation-gebco-1350.png"]
+        };
+
+        var id = hash.get("layer");
+        var pending = {};
+        var wanted = FILES[id] || (IMAGES[id] ? [] : FILES["surface"]);   // DEFAULT_LAYER
+        wanted.forEach(function (name) {
+            var url = root + name;
+            // Same options loadLayer() passes, so this is the request it would have made.
+            var p = fetch(url, {cache: "no-cache"}).then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            });
+            // A rejection is re-thrown to whoever takes the promise; until then, swallow it
+            // here so a failed prefetch never surfaces as an unhandled rejection.
+            p.catch(function () {});
+            pending[url] = p;
+        });
+        (IMAGES[id] || []).forEach(function (name) {
+            var img = new Image();
+            img.crossOrigin = "anonymous";   // must match sunlight.js, or it refetches
+            img.src = root + name;
+        });
+
+        window.__earthPreload = {
+            files: FILES,
+            images: IMAGES,
+            // Single-use: hand the promise over and forget it, so nothing is retained
+            // after the layer it belongs to has been built.
+            take: function (url) {
+                var p = pending[url];
+                delete pending[url];
+                return p;
+            }
+        };
+    })();
+    </script>
+
+    <!-- Inline, so it costs no request at all — the /favicon.ico 404 on every page
+         load was the last thing left in a clean console. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Ccircle%20cx%3D%2216%22%20cy%3D%2216%22%20r%3D%2215%22%20fill%3D%22%2312183a%22%2F%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%237fe3c8%22%20stroke-width%3D%221.6%22%3E%3Ccircle%20cx%3D%2216%22%20cy%3D%2216%22%20r%3D%2215%22%2F%3E%3Cellipse%20cx%3D%2216%22%20cy%3D%2216%22%20rx%3D%226.5%22%20ry%3D%2215%22%2F%3E%3Cpath%20d%3D%22M1.6%2011h28.8M1.6%2021h28.8M1%2016h30%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -74,13 +165,15 @@
 
     <script src="libs/d3.v7.min.js"></script>
     <script src="libs/topojson-client.min.js"></script>
-    <script src="libs/suncalc.js"></script>
     <script src="js/menu.js"></script>
     <!-- Generated lookup table read by wind.js at boot; must precede it. -->
     <script src="js/tz-centers.js"></script>
-    <!-- Renderer plug-in: registers its layers on window.EarthRenderers, which wind.js
-         merges into the layer registry at boot — so it must precede wind.js too. -->
-    <script src="js/sunlight.js"></script>
+    <!-- js/sunlight.js and its libs/suncalc.js dependency are NOT loaded here any more.
+         They are a renderer plug-in serving three of sixteen layers, and wind.js now
+         declares them in DEFERRED_RENDERERS instead: the first RealView selection loads
+         them, and an idle callback after the first layer renders warms them anyway. A
+         plug-in that wants the old behaviour can still be a plain <script> before wind.js
+         — registerRenderers() reads window.EarthRenderers either way. -->
     <script src="js/wind.js"></script>
 </body>
 </html>

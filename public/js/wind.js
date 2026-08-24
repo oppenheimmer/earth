@@ -419,7 +419,48 @@
     function ensureDetailMesh() {
         if (mesh10 || mesh10Loading || projection.scale() / initialScale <= DETAIL_ZOOM) return;
         mesh10Loading = true;
-        fetch("data/countries-10m.json").then(function (r) {
+        buildDetailMesh(DETAIL_MESH_URL).then(function (built) {
+            mesh10 = built;
+            drawMap(false);  // repaint the settled view with the sharper lines
+        }).catch(function (err) {
+            console.error(err);
+            mesh10Loading = false;  // allow a retry on the next settled deep-zoom draw
+        });
+    }
+
+    var DETAIL_MESH_URL = "data/countries-10m.json";
+
+    /**
+     * Fetch and build the 10m meshes, in a Worker when there is one. Inline the build takes
+     * 437 ms during which a 16 ms heartbeat gets zero ticks — a hard freeze, landing right
+     * after a zoom gesture. Nothing in it touches the DOM. See js/detail-worker.js for the
+     * per-stage breakdown and for what the Worker costs in return.
+     *
+     * The inline path below is the fallback, and not a vestigial one: Workers cannot be
+     * constructed from file:, which is a documented way to open this site.
+     */
+    function buildDetailMesh(url) {
+        if (typeof Worker === "function" && location.protocol !== "file:") {
+            try {
+                return new Promise(function (resolve, reject) {
+                    var worker = new Worker("js/detail-worker.js");
+                    worker.onmessage = function (e) {
+                        worker.terminate();     // one-shot: the meshes are built once per page
+                        if (e.data.error) reject(new Error(e.data.error));
+                        else resolve(e.data);
+                    };
+                    worker.onerror = function (err) {
+                        worker.terminate();
+                        reject(new Error("detail worker: " + (err.message || "failed")));
+                    };
+                    worker.postMessage({url: new URL(url, location.href).href});
+                });
+            }
+            catch (err) {
+                console.warn("detail worker unavailable, building inline", err);
+            }
+        }
+        return fetch(url).then(function (r) {
             if (!r.ok) throw new Error("countries 10m: HTTP " + r.status);
             return r.json();
         }).then(function (c10) {
@@ -434,15 +475,11 @@
                     poly.forEach(function (ring) { ring.reverse(); });
                 }
             });
-            mesh10 = {
+            return {
                 coast: topojson.mesh(c10, c10.objects.land),
                 borders: topojson.mesh(c10, c10.objects.countries, function (a, b) { return a !== b; }),
                 land: land
             };
-            drawMap(false);  // repaint the settled view with the sharper lines
-        }).catch(function (err) {
-            console.error(err);
-            mesh10Loading = false;  // allow a retry on the next settled deep-zoom draw
         });
     }
 
@@ -948,7 +985,9 @@
     // topologies (earth-topo, countries) stay in the repo and always load relative.
     // Resolution order: #data=<url> hash override (for testing a bucket before wiring
     // it in) → local files when served from localhost/file: → the R2 public URL.
-    var R2_DATA_ROOT = "https://pub-a466e24811b54104b700c58717968aab.r2.dev/";  // ← set to the bucket's public base URL
+    // The bucket through worker/, not through its r2.dev URL: r2.dev is HTTP/1.1 only,
+    // is not edge-cached, and answers in 300–800 ms. See the README's Serving chapter.
+    var R2_DATA_ROOT = "https://earth-data.globe-climatesim.workers.dev/";
     var DATA_ROOT = (function () {
         var override = new URLSearchParams(location.hash.slice(1)).get("data");
         if (override) return override.replace(/\/?$/, "/");
@@ -1151,14 +1190,102 @@
         minSleepTime: MIN_SLEEP_TIME
     };
 
-    Object.keys(window.EarthRenderers || {}).forEach(function (name) {
-        var renderer = window.EarthRenderers[name];
-        var layers = renderer.register(ENGINE, DATA_ROOT);
-        Object.keys(layers).forEach(function (id) {
-            layers[id].renderer = renderer;   // how loadLayer knows to hand the layer over
-            LAYERS[id] = layers[id];
+    // A renderer plug-in may be loaded at boot (a plain <script> before this one, which is
+    // how the contract began) or deferred to the first time one of its layers is asked for.
+    // js/sunlight.js and the SunCalc it depends on are 63 KB of source serving three of
+    // sixteen layers, and until now every visit that never opened RealView still parsed
+    // them on the boot path. A stub names the scripts and the ids they will register.
+    //
+    // Deferring does not mean withholding: once the first layer has rendered, an idle
+    // callback warms them anyway, so a later RealView click is normally instant. What the
+    // deferral buys is the boot path, not the bytes.
+    var DEFERRED_RENDERERS = [{
+        scripts: ["libs/suncalc.js", "js/sunlight.js"],   // in order — sunlight.js needs SunCalc
+        layers: ["daylight", "nightlights", "relief"]
+    }];
+
+    var renderersRegistered = {};
+
+    function registerRenderers() {
+        Object.keys(window.EarthRenderers || {}).forEach(function (name) {
+            if (renderersRegistered[name]) return;
+            renderersRegistered[name] = true;
+            var renderer = window.EarthRenderers[name];
+            var layers = renderer.register(ENGINE, DATA_ROOT);
+            Object.keys(layers).forEach(function (id) {
+                layers[id].renderer = renderer;   // how loadLayer knows to hand the layer over
+                LAYERS[id] = layers[id];
+            });
         });
-    });
+    }
+
+    function deferredFor(id) {
+        for (var i = 0; i < DEFERRED_RENDERERS.length; i++) {
+            if (DEFERRED_RENDERERS[i].layers.indexOf(id) >= 0) return DEFERRED_RENDERERS[i];
+        }
+        return null;
+    }
+
+    function loadScript(src) {
+        return new Promise(function (resolve, reject) {
+            var el = document.createElement("script");
+            el.src = src;
+            el.async = false;      // these are a dependency chain, not independent scripts
+            el.onload = function () { resolve(); };
+            el.onerror = function () { reject(new Error("script: " + src)); };
+            document.head.appendChild(el);
+        });
+    }
+
+    /** Load a deferred renderer's scripts once, register what they declare, and cache it. */
+    function loadDeferred(spec) {
+        if (!spec.promise) {
+            spec.promise = spec.scripts.reduce(function (chain, src) {
+                return chain.then(function () { return loadScript(src); });
+            }, Promise.resolve()).then(function () {
+                registerRenderers();
+                checkPreloadMap();   // its layers exist now, so their images can be checked
+            }).catch(function (err) {
+                spec.promise = null;   // a failed load must not poison the next click
+                throw err;
+            });
+        }
+        return spec.promise;
+    }
+
+    registerRenderers();
+
+    /**
+     * index.html prefetches the boot layer's dataset from an inline script, which has to run
+     * before any of this exists and therefore duplicates the file names below. Nothing breaks
+     * when the two drift — loadGrid() misses the prefetch and fetches normally — but the
+     * prefetch then spends 1.5–2 MB on a file nobody wants, which is silent and expensive.
+     * So compare the two maps once at boot and say so. Runs after the renderer merge, so the
+     * RealView layers are present and their images get checked too.
+     */
+    function checkPreloadMap() {
+        var preload = window.__earthPreload;
+        if (!preload) return;
+        function report(id, kind, got, want) {
+            if (got.join("|") === want.join("|")) return;
+            console.warn("stale prefetch map in index.html — layer '" + id + "' " + kind +
+                ": prefetch has " + JSON.stringify(got) + ", registry wants " + JSON.stringify(want));
+        }
+        Object.keys(LAYERS).forEach(function (id) {
+            var layer = LAYERS[id];
+            function rooted(names) {
+                return (names || []).map(function (n) { return DATA_ROOT + n; });
+            }
+            if (layer.renderer) {
+                report(id, "images", rooted(preload.images[id]),
+                    [layer.texture, layer.night, layer.relief].filter(Boolean));
+                return;
+            }
+            var want = [layer.file];
+            if (layer.scalar && layer.scalar.file) want.push(layer.scalar.file);
+            report(id, "data", rooted(preload.files[id]), want);
+        });
+    }
 
     var DEFAULT_LAYER = "surface";
     var DEFAULT_CREDIT = "GFS 0.25&deg; &nbsp;|&nbsp; NCEP / US National Weather Service";
@@ -1247,13 +1374,129 @@
         });
     }
 
+    // Built grids, keyed by dataset URL. Datasets are shared — surface wind backs four
+    // Atmosphere layers, the CMEMS currents back two Ocean ones — so this also makes the
+    // second of any such pair free, not just a return visit to the same layer. What it saves
+    // per hit is the fetch, the JSON.parse (50–95 ms) and the grid build.
+    //
+    // The cache is per page load, so `cache: "no-cache"` still does its job: a refreshed
+    // dataset appears on a plain reload, exactly as documented. What changes is that a layer
+    // re-selected *within* one session no longer re-reads the server — irrelevant against a
+    // 6-hourly refresh.
+    //
+    // A flow grid is ~8 MB of Float32 (a scalar grid half that), hence the cap. Eviction is
+    // oldest-inserted, which across a menu this size is close enough to least-recently-used.
+    var MAX_CACHED_GRIDS = 6;
+    var gridCache = new Map();
+
+    /**
+     * A built grid for `url`: from the cache, else from the inline prefetch in index.html,
+     * else from the network. `what` names the dataset in any error the caller surfaces.
+     */
+    // Raw fetches already in flight, by URL: the boot prefetch, a hover warm and the real
+    // load all meet here, so a dataset is never requested twice. Entries are dropped as soon
+    // as a grid is built from them — the parsed JSON is ~9 MB and the built grid supersedes it.
+    var pendingJson = {};
+    var claimedJson = {};  // URLs a loadGrid is currently building from — never release these
+    var warmedUrls = [];   // warmed but not yet consumed; bounded to one layer's worth
+
+    function fetchJson(url) {
+        if (!pendingJson[url]) {
+            var preload = window.__earthPreload;
+            // take() is single-use: the boot prefetch holds each promise until someone claims it.
+            pendingJson[url] = (preload && preload.take(url)) ||
+                fetch(url, {cache: "no-cache"}).then(function (r) {
+                    if (!r.ok) throw new Error("HTTP " + r.status);
+                    return r.json();
+                });
+            // A failure must not be cached as a permanent one, and an unclaimed rejection
+            // must not surface as unhandled.
+            pendingJson[url].catch(function () { delete pendingJson[url]; });
+        }
+        return pendingJson[url];
+    }
+
+    function loadGrid(url, build, what) {
+        var hit = gridCache.get(url);
+        if (hit) return Promise.resolve(hit);
+        // Claim it for the duration: a hover on some other layer must not release the entry
+        // this load is about to consume, or a second load of the same URL would refetch it.
+        claimedJson[url] = (claimedJson[url] || 0) + 1;
+        function done() {
+            if (--claimedJson[url] <= 0) delete claimedJson[url];
+        }
+        return fetchJson(url).then(function (records) {
+            var built = build(records);
+            done();
+            delete pendingJson[url];       // the JSON has served its purpose; let it go
+            gridCache.set(url, built);
+            while (gridCache.size > MAX_CACHED_GRIDS) {
+                gridCache.delete(gridCache.keys().next().value);
+            }
+            return built;
+        }, function (err) {
+            done();
+            throw new Error(what + ": " + err.message);   // only the load's own failures
+        });
+    }
+
+    /**
+     * Start a layer's downloads before it is chosen, on the strength of a pointer resting on
+     * its menu button or tabbing to it. Intent, not prediction: hovering is a strong signal
+     * and costs nothing when it turns out to be wrong, where an idle "probably next" prefetch
+     * would spend 1.5–2 MB on a guess — on a phone, someone else's guess and someone else's
+     * data. Only one layer is held warm at a time, so an unclaimed warm cannot accumulate.
+     */
+    function warmLayer(id) {
+        var layer = LAYERS[id];
+        if (!layer) {
+            var spec = deferredFor(id);
+            if (spec) loadDeferred(spec).catch(function () {});   // the scripts, not the imagery
+            return;
+        }
+        if (layer.renderer) {
+            // Renderer layers decode images; warming the browser's image cache is enough,
+            // and the crossOrigin must match or texture() opens a second request.
+            [layer.texture, layer.night, layer.relief].forEach(function (url) {
+                if (!url) return;
+                var img = new Image();
+                img.crossOrigin = "anonymous";
+                img.src = url;
+            });
+            return;
+        }
+        var urls = [layer.file];
+        if (layer.scalar && layer.scalar.file) urls.push(layer.scalar.file);
+        if (urls.every(function (u) { return gridCache.has(u) || pendingJson[u]; })) return;
+        // Release the previous warm first: dropping the last reference to an unclaimed
+        // promise is what lets its parsed JSON be collected.
+        warmedUrls.forEach(function (u) {
+            if (!gridCache.has(u) && !claimedJson[u]) delete pendingJson[u];
+        });
+        warmedUrls = urls;
+        urls.forEach(function (u) { fetchJson(u); });
+    }
+
     /**
      * Fetch a layer's dataset — or hand it to its renderer plug-in — and restart the pipeline
      * on it. The map topology is loaded once in init(); switching layers only swaps the data.
      */
     function loadLayer(id) {
         var layer = LAYERS[id];
-        if (!layer) return;
+        if (!layer) {
+            // Not registered yet: either it is a deferred renderer's layer and this click is
+            // what pays for it, or the id is simply unknown and there is nothing to do.
+            var spec = deferredFor(id);
+            if (!spec) return;
+            setStatus("loading renderer…");
+            loadDeferred(spec).then(function () {
+                loadLayer(id);
+            }).catch(function (err) {
+                console.error(err);
+                setStatus("error: " + err.message);
+            });
+            return;
+        }
         currentLayerId = id;
         cancelWork();
         clearTimeout(recomputeTimer);
@@ -1307,20 +1550,14 @@
             return;
         }
 
-        var fetches = [fetch(layer.file, {cache: "no-cache"}).then(function (r) {
-            if (!r.ok) throw new Error("wind data: HTTP " + r.status);
-            return r.json();
-        })];
+        var loads = [loadGrid(layer.file, buildGrid, "wind data")];
         if (layer.scalar && layer.scalar.file) {
-            fetches.push(fetch(layer.scalar.file, {cache: "no-cache"}).then(function (r) {
-                if (!r.ok) throw new Error("overlay data: HTTP " + r.status);
-                return r.json();
-            }));
+            loads.push(loadGrid(layer.scalar.file, buildScalarGrid, "overlay data"));
         }
-        Promise.all(fetches).then(function (results) {
-            grid = buildGrid(results[0]);
+        Promise.all(loads).then(function (results) {
+            grid = results[0];
             overlaySpec = layer.scalar || null;
-            scalarGrid = results.length > 1 ? buildScalarGrid(results[1]) : null;
+            scalarGrid = results.length > 1 ? results[1] : null;
             particleOpts = layer.particles || DEFAULT_PARTICLES;
             landFill = !!layer.landFill;
             flowFormat = layer.flowFormat || KMH;
@@ -1337,6 +1574,17 @@
 
     document.addEventListener("layerchange", function (e) {
         loadLayer(e.detail);
+    });
+
+    // Intent to switch, from either input model: a pointer settling on a button, or a
+    // keyboard tab landing on it. touchstart is deliberately absent — on a touch device the
+    // press that would trigger it is the selection itself, so there is nothing to gain and
+    // a mis-tap to pay for.
+    ["pointerenter", "focusin"].forEach(function (type) {
+        document.addEventListener(type, function (e) {
+            var btn = e.target.closest && e.target.closest(".layer[data-layer]");
+            if (btn && btn.dataset.layer !== currentLayerId) warmLayer(btn.dataset.layer);
+        }, true);   // capture: pointerenter does not bubble
     });
 
     function attachInteraction() {
@@ -1512,12 +1760,13 @@
         }
         drawScaleBar();
         attachInteraction();
+        checkPreloadMap();
         setStatus("downloading data…");
 
         // Optional initial layer via URL hash, e.g. #layer=surface (also the headless-
         // testing hook for verifying non-default layers, since the menu needs a click).
         var layerId = hash.get("layer");
-        if (!LAYERS[layerId]) layerId = DEFAULT_LAYER;
+        if (!LAYERS[layerId] && !deferredFor(layerId)) layerId = DEFAULT_LAYER;
 
         Promise.all([
             // "no-cache" = always revalidate with the server (cheap 304 when unchanged),
@@ -1551,10 +1800,29 @@
             };
             drawMap(false);
             loadLayer(layerId);
+            warmDeferredWhenIdle();
         }).catch(function (err) {
             console.error(err);
             setStatus("error: " + err.message);
         });
+    }
+
+    /**
+     * Pull in the deferred renderers once the browser has nothing better to do. Deferring
+     * them keeps 63 KB of source off the boot path; leaving them unloaded would just move
+     * the wait to the first RealView click, so this pays for them out of idle time instead.
+     * The timeout is a backstop for a page that never goes idle.
+     */
+    function warmDeferredWhenIdle() {
+        var warm = function () {
+            DEFERRED_RENDERERS.forEach(function (spec) {
+                loadDeferred(spec).catch(function (err) {
+                    console.warn("deferred renderer warm failed; a click will retry", err);
+                });
+            });
+        };
+        if (window.requestIdleCallback) window.requestIdleCallback(warm, {timeout: 8000});
+        else setTimeout(warm, 3000);
     }
 
     init();

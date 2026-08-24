@@ -3,14 +3,15 @@
 ![earth](./asset/view.png)
 
 A minimal replica of the meteorological visualization at
-[earth.nullschool.net](https://earth.nullschool.net/): an orthographic globe with a colored
-scalar field and thousands of particles advected through a live vector field. Thirteen layers
-across two domains (Atmosphere, Ocean) are driven by NOAA GFS, NOAA GFS-Wave and Copernicus
-Marine (CMEMS) data.
+[earth.nullschool.net](https://earth.nullschool.net/): a globe with a colored
+scalar field and thousands of particles advected through a live vector field. Sixteen layers
+across three domains. Thirteen of them — **Atmosphere** and **Ocean** — are driven by NOAA GFS,
+NOAA GFS-Wave and Copernicus Marine (CMEMS) data. The other three are **RealView**: NASA imagery
+of the surface, projected and lit by the real sun rather than interpolated from a grid.
 
-The site is static — four stacked canvases, vanilla JS, vendored D3 v7 + topojson-client, no
-build step, no framework. The core algorithms are ported from
-[cambecc/earth](https://github.com/cambecc/earth) (MIT):
+The site is static — four stacked canvases, vanilla JS, vendored D3 v7 + topojson-client +
+SunCalc, no build step, no framework. The 4 core algorithms are ported from
+[cambecc/earth](https://github.com/cambecc/earth) (MIT) and refined over several iterations:
 
 - **Grid interpolation** — bilinear interpolation of u/v components on a regular lat/lon grid
   (0.25°×0.25° globally), NaN-tolerant so fields with land holes reach their coastline.
@@ -31,7 +32,7 @@ build step, no framework. The core algorithms are ported from
 Any static server works — `start.sh` is just
 `python3 -m http.server 8420 -d public` plus an `xdg-open`.
 
-Neither the fourteen weather datasets nor the RealView imagery is **in the git repo**
+Neither the weather datasets nor the RealView imagery is in the git repo
 ([Data](#data)). For a working local page, either populate `public/data/` — the weather JSONs via
 [Refreshing the data](#refreshing-the-data), the imagery via a one-off `./scripts/fetch_textures.sh`
 — or borrow the deployed bucket with the `#data=` hash below. The two are independent: without the
@@ -51,7 +52,7 @@ Without `#rotate=`, the globe opens centered on the visitor's country, inferred 
 timezone with no permission prompt and no network request — see
 [Initial view: timezone lookup](#initial-view-timezone-lookup).
 
-The hash is **written back** as the view settles (on a layer change, and 200 ms after the last
+The hash is written back as the view settles (on a layer change, and 200 ms after the last
 drag, wheel or pinch), so the address bar always describes what is on screen and a copied URL
 reproduces it. `history.replaceState` is used, so dragging does not fill the back button, and a
 `#data=` override is carried through verbatim. Reading is still boot-only: editing the hash by
@@ -60,14 +61,19 @@ hand needs a reload to take effect.
 `#layer=` and `#rotate=`/`#zoom=` are also the headless-testing hooks: the burger menu needs a
 real click, and a specific view can otherwise only be reached by dragging.
 
-After editing `wind.js`, `sunlight.js` or `menu.js`, reload hard (Ctrl+Shift+R) — there is no
-cache-busting on the script tags. Data fetches use `{cache: "no-cache"}`, so refreshed datasets appear on a plain
-reload.
+After editing `wind.js`, `menu.js` or `sunlight.js`, reload hard (Ctrl+Shift+R). Filenames carry
+no hash — there is no build step to add one — so on the deployed site `/js/` is served
+`max-age=0, stale-while-revalidate=600` and an ordinary reload can paint the previous version for
+up to ten minutes ([Cache headers](#cache-headers)). Locally it does not arise: `start.sh`'s
+server sends no cache headers at all. Data fetches use `{cache: "no-cache"}` either way, so a
+refreshed dataset shows up on a plain reload.
 
 Deployment: live at **[globe-climatesim.vercel.app](https://globe-climatesim.vercel.app)**. Vercel
 serves `public/` (`vercel.json` sets `outputDirectory` and cache headers), the weather JSONs come
 from a Cloudflare R2 bucket, and `.github/workflows/refresh-data.yml` refreshes them every six
-hours without touching git ([Automated refresh](#automated-refresh)).
+hours without touching git ([Automated refresh](#automated-refresh)). How the page is *served* —
+what is fetched when, in what order, and over what — is its own section:
+[Serving](#serving-latency-compression-lazy-loading).
 
 ## Project structure
 
@@ -80,19 +86,26 @@ hours without touching git ([Automated refresh](#automated-refresh)).
 ├── .env/                        # git-ignored credentials: copernicusmarine, r2
 ├── .github/workflows/
 │   └── refresh-data.yml         # 6-hourly refresh of all 14 datasets → R2 (no commits, no deploys)
+├── worker/                      # Cloudflare Worker fronting the R2 bucket (see Serving)
+│   ├── index.js                 #   edge-cached reads over h2/h3, replacing r2.dev
+│   ├── wrangler.toml            #   `npx wrangler deploy` from here; browser OAuth on first run
+│   └── README.md
 ├── scripts/
 │   ├── refresh_wind.py          # GFS winds + 2 m scalars via NOMADS, pygrib (anonymous)
 │   ├── refresh_ocean.py         # CMEMS currents + thetao via copernicusmarine (credentialed)
 │   ├── refresh_waves.py         # GFS-Wave (WAVEWATCH III) height/period/direction (anonymous)
-│   ├── upload_data.sh           # brotli-compresses public/data/current-*.json into the R2 bucket
+│   ├── upload_data.sh           # uploads public/data/current-*.json to R2 (plain; edge compresses)
 │   ├── fetch_textures.sh        # ONE-OFF: downloads the NASA imagery the RealView layers use
 │   ├── upload_textures.sh       # ONE-OFF: ships that imagery to R2 (never in the refresh loop)
 │   └── gen_tz_centers.js        # regenerates public/js/tz-centers.js from tzdata + countries-50m
 └── public/                      # the deployable site (code + static assets only)
     ├── index.html               # four stacked canvases (#map, #overlay, #animation, #lines) + HUD
+    │                            #   + an inline boot prefetch in <head> (see Serving)
     ├── css/styles.css           # dark theme, bottom-left HUD bar + expandable menu panel
-    ├── js/wind.js               # the whole engine (~1480 lines, one IIFE)
-    ├── js/sunlight.js           # renderer plug-in: the RealView layers (~730 lines)
+    ├── js/wind.js               # the whole engine (~1830 lines, one IIFE)
+    ├── js/sunlight.js           # renderer plug-in: the RealView layers (~1020 lines) — NOT in a
+    │                            #   script tag: wind.js loads it on first RealView use (Serving)
+    ├── js/detail-worker.js      # builds the 10m meshes off the main thread (Serving)
     ├── js/menu.js               # burger toggle, tab switching, layerchange dispatch (~40 lines)
     ├── js/tz-centers.js         # GENERATED: timezone → country centroid, for the initial view
     ├── libs/
@@ -102,11 +115,13 @@ hours without touching git ([Automated refresh](#automated-refresh)).
     └── data/
         ├── current-*.json       # the 14 weather datasets — GIT-IGNORED (data/code split):
         │                        #   refresh scripts write them here for local dev,
-        │                        #   upload_data.sh ships them to Cloudflare R2 for production,
-        │                        #   wind.js picks local vs R2 by hostname (see Data)
-        ├── bluemarble-*.jpg     # 12 monthly Blue Marble NG composites — GIT-IGNORED, static:
+        │                        #   upload_data.sh ships them to R2, served through worker/,
+        │                        #   wind.js picks local vs Worker by hostname (see Data)
+        ├── bluemarble-*.webp    # 12 monthly Blue Marble NG composites — GIT-IGNORED, static:
         │                        #   fetch_textures.sh writes them, upload_textures.sh ships them
-        │                        #   *-21600.jpg are the deep-zoom twins, fetched past DETAIL_ZOOM
+        │                        #   three tiers: base 5400, *-10800.webp once worthCropping()
+        │                        #   engages, and *-21600.jpg (JPEG: WebP stops at 16383 px)
+        │                        #   once chooseMaster() says it earns its bytes
         ├── blackmarble-*.jpg    # VIIRS night lights — GIT-IGNORED, same lifecycle (5400 + 13500)
         ├── elevation-gebco-*.png  # GEBCO elevation, for Relief — GIT-IGNORED, ditto (1350 + 2700)
         ├── earth-topo.json      # Natural Earth coastline/lake topology (50m + 110m) — in git
@@ -127,7 +142,10 @@ boot. `public/js/menu.js` only translates clicks into events; the engine owns al
 ### Rendering pipeline
 
 1. **Load** — `init()` fetches the three topologies in parallel, builds the meshes, then
-   `loadLayer()` fetches the active layer's flow dataset (plus its scalar dataset, if any).
+   `loadLayer()` resolves the active layer's flow dataset (plus its scalar dataset, if any).
+   Usually it does not *fetch* it: an inline script in `index.html` requested it during HTML
+   parse and `loadGrid()` claims that promise, or finds the built grid already in the cache
+   ([Serving](#serving-latency-compression-lazy-loading)).
    `buildGrid()` indexes the two flow records (u: `parameterCategory` 2 / `parameterNumber` 2,
    v: 2/3) into a `nj`-row grid with a duplicated wrap-around column and exposes
    `interpolate(λ, φ)`. Grid geometry comes from the header (`nx`, `ny`, `lo1`, `la1`, `dx`,
@@ -149,7 +167,8 @@ boot. `public/js/menu.js` only translates clicks into events; the engine owns al
    past the coast. 110m geometry is used while dragging, 50m when idle — and past `DETAIL_ZOOM`
    (4×) the first idle draw lazily fetches world-atlas `countries-10m.json` (~3.7 MB, once) and
    idle draws switch to 10m coastline/borders/landmass, so deep zoom keeps crisp lines (lakes
-   stay 50m). Both canvases render at `devicePixelRatio` for crisp lines.
+   stay 50m). That fetch, parse, merge and mesh runs in `js/detail-worker.js`, off the main
+   thread — inline it froze the page for 437 ms right after a zoom gesture. Both canvases render at `devicePixelRatio` for crisp lines.
 3. **Mask** — the sphere is filled with a sentinel color (magenta, unreachable by any of the
    color scales) on an offscreen canvas. Its `imageData` tells the interpolator which pixels are
    on the globe (alpha > 0) and then doubles as the overlay image.
@@ -206,7 +225,7 @@ credit/date lines, `landFill`, the click-readout format, the readout's idle `pla
 `label` that titles the document. `index.html`'s menu buttons carry
 matching `data-layer` ids. One layer is displayed at a time; layers are never combined.
 
-The last two rows are **renderer layers**: they carry a `renderer` reference instead of a flow
+The last three rows are **renderer layers**: they carry a `renderer` reference instead of a flow
 file, and none of the grid → field → particles machinery runs for them. See
 [Renderer plug-ins](#renderer-plug-ins).
 
@@ -239,10 +258,17 @@ winds need no per-level tuning.
 
 ### Renderer plug-ins
 
-Not every layer is weather. A script loaded *before* `wind.js` may register a renderer on
-`window.EarthRenderers`; its layers join `LAYERS` at boot, and while one of them is displayed the
-renderer owns the overlay canvas instead of the grid → field → particles pipeline.
-`public/js/sunlight.js` is the first plug-in, supplying all three RealView layers.
+Not every layer is weather. A script may register a renderer on `window.EarthRenderers`; its
+layers join `LAYERS`, and while one of them is displayed the renderer owns the overlay canvas
+instead of the grid → field → particles pipeline. `public/js/sunlight.js` is the first plug-in,
+supplying all three RealView layers.
+
+A plug-in arrives one of two ways. Loaded *before* `wind.js` in a `<script>` tag, it registers at
+boot — the original contract, still supported. Or it is **declared and deferred**: an entry in
+`DEFERRED_RENDERERS` names its scripts and the layer ids they will register, `loadLayer()` loads
+them the first time one of those ids is asked for, and an idle callback warms them once the first
+layer is on screen. `sunlight.js` is deferred, which is why it has no script tag; see
+[Serving](#serving-latency-compression-lazy-loading) for what that buys and what it does not.
 
 The split is **state versus pixels**. The engine keeps everything that holds a render onto the
 globe — the projection instance, the four canvases, drag/wheel/pinch, the cancel token, the
@@ -292,10 +318,23 @@ them decodes nothing.
 **Deep zoom.** The base composites are 5400 × 2700, which is 15 px per degree; the globe draws
 `scale · π/180` px per degree at its centre, so the imagery runs out of detail at 2.6× on a 790 px
 viewport and at 1.9× on a 1080 px one — the same softening on a big screen that a small one only
-reaches by zooming. Past `DETAIL_ZOOM` the 21600 × 10800 masters take over at 60 px/deg, giving
-roughly 10×. They cannot be decoded whole (933 MB as RGBA), so `ensureDetail()` keeps the decoded
-`<img>` and reads back only the window the camera can see — see [Deep-zoom detail](#fixed-bugs)
-below and the block comment above `visibleCap()` in `sunlight.js`.
+reaches by zooming.
+
+Past that there are two sharper tiers: the 10800 × 5400 WebP at 30 px/deg and the 21600 × 10800
+master at 60. Which one a view earns used to be two zoom constants, `DETAIL_ZOOM` (2.5×) and
+`MID_ZOOM` (5×), and both were read off `scale · π/180` — a CSS-pixel figure, while `render()`
+draws at `scale · overlayScale`. On a Retina display every crossover therefore arrived at half the
+zoom quoted, and neither constant could follow the viewport either. They are gone: `worthCropping()`
+decides whether to cut at all and `chooseMaster()` which grid to cut from, both from
+`screenDetail()`, which carries `overlayScale` and the viewport with it. On a 1600 × 900 CSS-pixel
+display the crop still engages around 2.4× and the master around 5×, as before — a Retina one now
+gets its own thresholds instead, engaging from ~1.35×. The mid tier exists because there used to
+be nothing between 5400 and 21600, so nudging past 2.5× pulled a whole ~23 MB master to read one
+window out of it; it costs ~3.5 MB instead, and a view that jumps straight past 5× skips it
+entirely. Neither master can be decoded whole (the 21600 is 933 MB as RGBA), so `ensureDetail()`
+keeps the decoded `<img>` and reads back only the window the camera can see, re-cutting when the
+tier changes — see [Deep-zoom detail](#fixed-bugs) below and the block comment above
+`visibleCap()` in `sunlight.js`.
 
 - **Imagery.** Blue Marble: Next Generation (MODIS/Terra, 2004), the 8 km composite, one image per
   month — the layer picks the current month and gets the season's snow line and vegetation for
@@ -362,10 +401,11 @@ below and the block comment above `visibleCap()` in `sunlight.js`.
 | `RELIEF_SUN_REF` | sin(35°) | relief strength tapers linearly with sun elevation below this |
 | `RELIEF_CLAMP` | 0.62 | most relief may brighten or darken daylight |
 | `TEXTURE_MAX_WIDTH` | 5400 | decode cap, halved on mobile — 5400 × 2700 RGBA is 58 MB; the elevation map takes half that again, a quarter on mobile |
-| `DETAIL_ZOOM` | 2.5 | zoom past which the high-res masters are fetched and cropped (desktop only) |
-| `DETAIL_MAX_CROP` | 3072 px | cap per axis on the cropped readback — 3072² RGBA is 38 MB |
+| `MID_GRID` / `HI_GRID` | 10800 / 21600 | the two deep-zoom grids, px across; `register()` builds the URLs from them and `chooseMaster()` reasons about them, so the two cannot drift |
+| `DETAIL_MAX_CROP` | 4096 px | the cropped readback's budget, as the edge of a square of equal area — 4096² RGBA is 67 MB. `cropSize()` splits that area between the axes by demand rather than capping each |
+| `DETAIL_MAX_AXIS` | 8192 px | per-axis ceiling, so a degenerate window cannot cut a one-pixel strip |
 | `DETAIL_MARGIN` | 0.18 | crop overshoot past the visible cap, as a fraction of each span |
-| `DETAIL_REZOOM` | 1.6 | re-cut the crop once zoom has grown this much since it was cut |
+| `DETAIL_REGAIN` | 1.15 | re-cut only when a fresh crop would carry this much more detail than the one in hand |
 | `PREVIEW_STEP` | 4 px | drag-preview sampling stride |
 | `SUN_TICK` | 60000 ms | automatic re-render interval |
 
@@ -469,7 +509,7 @@ line, which stays visible while collapsed so load progress and errors always sho
 expands `#menu-panel` upward:
 
 - **Domain tabs** stack vertically — each tab header sits directly above its own `.tab-body`, one
-  domain expanded at a time. Atmosphere holds seven layers, Ocean six, RealView two; all are live.
+  domain expanded at a time. Atmosphere holds seven layers, Ocean six, RealView three; all are live.
 - **Layer buttons** dispatch a `layerchange` `CustomEvent` with the layer id.
   `loadLayer()` in the engine swaps the dataset(s), restarts the pipeline, and syncs the
   active-button state (single source of truth), including revealing the tab that owns the layer
@@ -485,10 +525,6 @@ expands `#menu-panel` upward:
 - **Document title** is `earth · <label>`, so a tab or bookmark says which layer it holds. That is
   the only reader of `LAYERS[].label`.
 
-CSS gotcha: `.tab-body` uses `display: flex`, which beats the `hidden` attribute's UA-stylesheet
-`display: none` — hence the explicit `.tab-body[hidden] { display: none; }` rule. Headless
-gotcha: the burger can't be clicked, so screenshot the open panel by temporarily removing the
-`hidden` attribute from `#menu-panel`.
 
 ### Initial view: timezone lookup
 
@@ -556,18 +592,20 @@ Known limits, none of them fixable from here:
 
 The `current-*` weather JSONs are not in git. The refresh scripts write them to
 `public/data/` (git-ignored) so local dev works normally; production serves them from a
-**Cloudflare R2 bucket**. In `wind.js` every weather-file URL goes through `DATA_ROOT`, resolved
-once at load:
+**Cloudflare R2 bucket, through the Worker in `worker/`**
+([Serving](#serving-latency-compression-lazy-loading)). In `wind.js` every weather-file URL goes
+through `DATA_ROOT`, resolved once at load:
 
 1. a `#data=<url>` hash override (for testing a bucket before wiring it in, e.g.
    `#layer=waves&data=https://bucket.example/`), then
 2. local `data/` when served from `localhost`, `127.x`, `[::1]` or `file:`, otherwise
-3. `R2_DATA_ROOT` — a constant at the top of the orchestration section, set to the bucket's
-   public base URL.
+3. `R2_DATA_ROOT` — a constant at the top of the orchestration section, set to the Worker's base
+   URL (`https://earth-data.globe-climatesim.workers.dev/`). It pointed at the bucket's r2.dev URL
+   until 2026-08-24; that endpoint still works and is the one-line rollback.
 
-All three paths are verified: localhost serving from `data/`, a cross-origin bucket via `#data=`,
+All three paths are verified: localhost serving from `data/`, a cross-origin origin via `#data=`,
 and the deployed site itself, where `data/current-*.json` 404s on the Vercel
-origin and every weather fetch resolves to the bucket. The consequence that matters: data refreshes
+origin and every weather fetch resolves to the Worker. The consequence that matters: data refreshes
 create no commits, no force-pushes and no Vercel deploys — the repo carries no history churn and
 Vercel only redeploys on code pushes.
 
@@ -575,30 +613,33 @@ Vercel only redeploys on code pushes.
 (`--cache-control "public, max-age=1800, must-revalidate"`). It globs `current-*.json`, so a
 dataset added by a future layer is picked up automatically. Required environment (locally from the
 git-ignored `.env/r2`): `R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional
-`R2_BUCKET` (default `earth-data`). It also needs the `brotli` binary on `PATH`.
+`R2_BUCKET` (default `earth-data`). Nothing else — it used to need `brotli` on `PATH` and no
+longer does.
 
 ### The static imagery (RealView layers)
 
 A second git-ignored class of data, with a deliberately different lifecycle from the weather
 JSONs: the 12 Blue Marble monthly composites, the Black Marble night lights and the GEBCO
-elevation map — **21.8 MB for 14 files**. The two colour sets share one 5400 × 2700 grid
-(0.0667°/px, ~7.4 km at the equator); the elevation map is a quarter of that, because relief
-shading consumes its *gradient* and mountains are large features. They follow the same local-vs-R2 split through `DATA_ROOT`, so localhost serves them from
-`public/data/` and production from the bucket — but they are *static*, dated 2004 and 2016, and
-must never enter the refresh loop.
+elevation map — **13.3 MB for 14 files** since the Blue Marble became WebP (22.9 MB before). 
+The two colour sets share one 5400 × 2700 grid (0.0667°/px, ~7.4 km at the equator); 
+the elevation map is a quarter of that, because relief shading consumes its *gradient* and 
+mountains are large features. They follow the same local-vs-R2 split through `DATA_ROOT`, 
+so localhost serves them from `public/data/` and production from the bucket, but they are *static*, 
+dated 2004 and 2016, and must never enter the refresh loop.
 
 Hence two separate one-off scripts rather than an extension of `upload_data.sh`, which globs
 `current-*.json` only and is what the 6-hourly workflow runs:
 
 - `scripts/fetch_textures.sh` downloads `world.topo.2004MM.3x5400x2700.jpg` ×12 from
   `assets.science.nasa.gov` and the Black Marble composite from `eoimages.gsfc.nasa.gov`, writing
-  `bluemarble-2004MM.jpg`, `blackmarble-2016-5400.jpg` and `elevation-gebco-1350.png`. Existing
-  files are skipped unless `FORCE=1`. Needs `ffmpeg` as well as `curl`, for the two resamples
-  below.
+  `bluemarble-2004MM.webp`, `blackmarble-2016-5400.jpg` and `elevation-gebco-1350.png`. The Blue
+  Marble JPEG NASA publishes is kept on disk as the encode's source, but it is the `.webp` beside
+  it that ships. Existing files are skipped unless `FORCE=1`. Needs `curl`, `ffmpeg` for the two
+  resamples below, and `cwebp` (libwebp) for the Blue Marble encodes.
 - **It also fetches a deep-zoom twin of each** — `bluemarble-2004MM-21600.jpg` (NASA's own
   21600 × 10800 grid, 21 MB each), `blackmarble-2016-13500.jpg` (the 3 km original, no longer
   discarded after the downscale) and `elevation-gebco-2700.png`. That takes the one-off from
-  ~22 MB to ~285 MB; `SKIP_HIRES=1` fetches the base set only, and the site then simply never
+  ~34 MB to ~365 MB; `SKIP_HIRES=1` fetches the base set only, and the site then simply never
   leaves the 5400 imagery. `upload_textures.sh` needed no change — its globs already match the
   new names.
 - **The night lights are fetched at 3 km and downscaled here, not in the browser.** NASA publishes
@@ -617,76 +658,122 @@ Hence two separate one-off scripts rather than an extension of `upload_data.sh`,
   505 ms to a layer load and 38 MB of heap, against 113 ms and 1 MB at half that. **It is PNG,
   and that is not a preference**: relief shading differentiates this map, and JPEG's ringing
   injects ~28% noise into exactly that quantity. Lossless costs 0.17 MB against 0.05 MB.
-- `scripts/upload_textures.sh` ships them to R2 with `image/jpeg` and
+- **The Blue Marble is WebP, and has a third tier.** Both measured 2026-08-24. The base
+  composites re-encode at q85 from a mean **1.78 MB to 0.99 MB** — 21.4 MB to 11.8 MB across the
+  twelve — at SSIM 0.985 against the JPEG NASA publishes (q78 scores 0.980, q90 0.991). Safe
+  because this imagery is only ever sampled as colour, with no readback to protect. Sizes vary a
+  good deal by season: August is the smallest month at 0.85 MB and December the largest at 1.08.
+  And there was nothing between 5400 (15 px/deg, out of detail around 2.5× on a CSS-pixel
+  display and 1.3× on a Retina one) and 21600
+  (60 px/deg), so crossing 2.5× pulled a whole **~23 MB** master in order to read one window out
+  of it: a viewer who zoomed a little paid as if they had zoomed all the way.
+  `bluemarble-*-10800.webp` is 30 px/deg for a mean **3.53 MB**, resampled out of the master by
+  `cwebp -resize` (SSIM 0.986 against an ffmpeg-lanczos route, and no 300 MB PNG intermediate).
+  Each tier doubles px/deg and so earns roughly twice the zoom, though `chooseMaster()` now decides
+  that per window rather than per zoom. Checked at 3.5× on the August composite: 3.0 MB against 21.3, SSIM 0.967, and
+  a Himalaya crop of the two renders is indistinguishable. A view that jumps straight past 5×
+  never fetches the mid tier; one that pauses on the way fetches both.
+- **The night lights and the elevation map are deliberately not re-encoded**, for the same reason
+  the elevation map is PNG: their pixels are read back, not looked at, and lossy WebP poisons
+  exactly what they are read for. Over the night lights, worst unlit-backdrop leakage through the
+  `r − 0.6·b` extraction goes from 2/255 to **22/255 at q85**, and is still 12/255 at q95, against
+  the ~1.4/255 the extraction can absorb — WebP spends its bit budget on the 99.9% of that image
+  which is black, and the lights are what it rounds off. Lossless WebP is clean but 3.6 MB against
+  1.34 MB. Progressive JPEG was considered for what stays JPEG and dropped: 8% of the bytes for
+  extra decode time, on the files whose decode cost the whole pipeline is already built around.
+- `scripts/upload_textures.sh` ships them to R2 with the right type per extension and
   `public, max-age=31536000, immutable`. A year-long immutable cache is safe because the file
   names carry the composite's own date — and, for the night lights, its grid, so a future
   resample lands on a new key instead of behind a year-long cache. Same `.env/r2` credentials as
   `upload_data.sh`.
 
-**No brotli here**: JPEG is already entropy-coded — measured, `-q 9` saves 0.4% for ~2 s of CPU
-per file. `sunlight.js` sets `crossOrigin="anonymous"` on the images because it reads the pixels
+**No brotli here**: JPEG and WebP are both already entropy-coded — measured, `-q 9` saves 0.4% for
+~2 s of CPU per file. `sunlight.js` sets `crossOrigin="anonymous"` on the images because it reads the pixels
 back with `getImageData`, which throws on a tainted canvas.
 
-### Compression: pre-compressed objects, not edge compression
+### Compression: uncompressed objects, compressed at the edge
 
+**This reverses an earlier design, and the reason is worth keeping.** The weather JSONs used to
+be stored *already* brotli-compressed with `Content-Encoding: br` on the object, because
 **r2.dev never compresses on the fly** — re-measured 2026-08-21, offering `gzip, br, zstd` still
-returns the full raw body with no `Content-Encoding`. The fix is not a custom domain: R2 *stores*
-and serves a `Content-Encoding` you set at upload, so `upload_data.sh` brotli-compresses each file
-(`-q 9`) and uploads the compressed bytes with `--content-encoding br`. **The object key keeps the
-plain `.json` name**, so every URL is unchanged and `wind.js` needed no edit at all.
+returned the full raw body with no `Content-Encoding`. Storing the encoding was the only way to
+get anything off the wire, and it bought 6.0× (119.3 MB → 19.9 MB).
 
-Measured over the shipped set: **119.3 MB raw → 19.9 MB on the wire, 6.0×**, and every object
-decodes byte-identically to its local source. Three client behaviors were probed against r2.dev
-before adopting this:
+Putting [the Worker](#serving-latency-compression-lazy-loading) in front removed that premise,
+and trying to keep both fought the platform. Three deploys, three distinct failure modes, each
+measured against the live Worker:
 
-| Client sends | Server returns | Result |
-|---|---|---|
-| `Accept-Encoding: br, gzip` | `Content-Encoding: br` | compressed — the browser case |
-| `Accept-Encoding: gzip` only | *(no encoding)* | Cloudflare decompresses at the edge |
-| nothing | *(no encoding)* | Cloudflare decompresses at the edge |
+1. Re-wrapping a cached body in a new `Response` loses the runtime's record that the body is
+   already encoded, so the edge encoded it **again**: cache hits came back as
+   `brotli(brotli(json))`, and a browser negotiating zstd got `zstd(brotli(json))` and handed
+   `JSON.parse` binary. Visible as 1 667 261 bytes served for a 1 665 049 byte object.
+2. Returning the cached `Response` untouched did not help — the edge still re-compressed live,
+   the response size drifting run to run.
+3. `Cache-Control: no-transform` stopped the re-compression, and the edge then **stripped
+   `Content-Encoding` entirely**, so clients received brotli bytes labelled
+   `application/json`. `encodeBody: "manual"` governs the runtime, not the edge.
 
-So clients that cannot take brotli are served correct raw bytes rather than breaking — the
-degradation is graceful in *correctness*. It is not cheap, though, and the table's middle row is
-the one to notice: a gzip-capable client does **not** get gzip, it gets the full uncompressed
-object, because Cloudflare decompresses the stored brotli at the edge and re-encodes nothing.
-Re-measured on the surface wind layer: **1.58 MB with `br`, 8.94 MB without — 5.7×**. Every
-current browser advertises `br` over HTTPS, so this normally never fires; the cases that do are a
-plain-`http://` origin (Chrome and Firefox both withhold `br` on insecure origins) and any proxy
-or privacy layer that rewrites `Accept-Encoding` in order to inspect bodies. Worth checking before
-blaming a slow mobile load on the renderer. Rollback is a plain
-re-upload of the uncompressed files to the same keys.
+The Workers runtime has no brotli decompressor (`DecompressionStream` covers gzip and deflate),
+so a Worker cannot hand the edge something it is willing to re-encode itself. Storing plain JSON
+is what the platform is built for: the edge negotiates br, zstd or gzip per client and caches a
+variant for each, and every piece of machinery above disappears — `worker/index.js` is a third
+smaller as a result.
 
-Why `-q 9`: across the datasets it beats `gzip -9` (17.3 MB vs 18.9 MB on the 12-dataset corpus)
-at roughly a third of the CPU, while `-q 11` costs ~7 s per file for another ~7%. Whole-run
-compression cost is ~11 s of CPU. Vercel independently serves the code and topologies with
-`content-encoding: br`, as it always has.
+**What it costs, measured over the shipped set:** 119.3 MB raw → **25.7 MB on the wire (4.6×)**,
+against the pre-compressed 19.9 MB (6.0×). The edge compresses at a lower level than `brotli
+-q 9` did — 722 KB against 543 KB on the wave-height file, about **+33%**. That is a real
+regression in bytes and it is worth it, because the same change takes TTFB from 300–800 ms to
+**70–130 ms** on a cache hit, which dominates for a file this size. R2 storage goes from ~20 MB
+to ~119 MB, which costs pennies. All 14 datasets verified end to end: `Content-Encoding: br`
+negotiated, byte-identical to the local source after decode.
 
-### The fourteen datasets
+Two consequences worth noting. Object **keys never changed**, so no URL moved and `wind.js`
+needed no edit for the compression change itself. And `r2.dev` now serves these objects
+uncompressed — it is no longer in the serving path, but if you ever point `R2_DATA_ROOT` back at
+it as a rollback, expect 119 MB rather than 20 MB across the set.
+
+`brotli` is no longer needed on `PATH` for `upload_data.sh`, nor in the refresh workflow.
+
+**The imagery is a separate case** and unchanged: JPEG and WebP are already entropy-coded, so
+nothing is gained by encoding them, and `upload_textures.sh` stores them as-is. The Worker adds
+`Cache-Control: no-transform` to them and *only* to them — those files are read back pixel by
+pixel, and an edge-side image transform would corrupt exactly what they are read for, behind a
+year-long cache. On the JSONs the same header would forbid the compression this design depends
+on.
+
+### The Datasets
 
 These are the weather datasets only — the RealView layers' JPEGs are not among them (they are
 static, never refreshed, and not grib2json; see [The static imagery](#the-static-imagery-realview-layers)).
 
 All in grib2json format (the subset of header fields `wind.js` reads), all 0.25° global grids,
-~119 MB total raw / ~20 MB as served ([Compression](#compression-pre-compressed-objects-not-edge-compression)).
+**~119 MB total raw, ~25.7 MB across the wire**
+([Compression](#compression-uncompressed-objects-compressed-at-the-edge)).
 GFS/GFS-Wave grids are 1440×721 with a 0° origin; the CMEMS grids are 1440×681 with a -180° origin
-(the store stops at 80°S). Sizes below are raw; the brotli figure is what actually crosses the wire.
+(the store stops at 80°S).
 
-| File | Contents | Raw / wire | Source / script | Product arg |
+Sizes below are **raw**, which is now what the object in the bucket actually is. There is no
+per-file wire figure any more and that is deliberate: since the edge compresses on demand, the
+encoded size is a property of the negotiated encoding and the edge's compressor, not of the file
+— the same object goes out as br, zstd or gzip at different sizes. The aggregate is in the
+Compression section.
+
+| File | Contents | Raw | Source / script | Product arg |
 |---|---|---|---|---|
-| `current-wind-surface-level-gfs-0.25.json` | 10 m u/v wind | 8.9 / 1.6 MB | GFS via `refresh_wind.py` | `surface` |
-| `current-wind-1000hpa-gfs-0.25.json` | u/v @ 1000 hPa | 9.0 / 1.6 MB | 〃 | `1000hpa` |
-| `current-wind-500hpa-gfs-0.25.json` | u/v @ 500 hPa | 9.3 / 1.7 MB | 〃 | `500hpa` |
-| `current-wind-10hpa-gfs-0.25.json` | u/v @ 10 hPa | 9.6 / 1.5 MB | 〃 | `10hpa` |
-| `current-temp-surface-level-gfs-0.25.json` | 2 m temperature, K | 5.9 / 0.8 MB | 〃 | `temperature` |
-| `current-rh-surface-level-gfs-0.25.json` | 2 m relative humidity, % | 5.0 / 1.1 MB | 〃 | `rh` |
-| `current-dewpoint-surface-level-gfs-0.25.json` | 2 m dew point, K | 5.9 / 0.8 MB | 〃 | `dew` |
-| `current-ocean-currents-cmems-0.25.json` | u/v currents @ 0.494 m | 11.2 / 2.0 MB | CMEMS via `refresh_ocean.py` | `currents` |
-| `current-ocean-currents-25m-cmems-0.25.json` | u/v currents @ 25.211 m | 11.2 / 1.9 MB | 〃 | `currents25` |
-| `current-ocean-currents-110m-cmems-0.25.json` | u/v currents @ 109.729 m | 11.1 / 1.8 MB | 〃 | `currents110` |
-| `current-ocean-currents-450m-cmems-0.25.json` | u/v currents @ 453.938 m | 11.0 / 1.6 MB | 〃 | `currents450` |
-| `current-ocean-temp-cmems-0.25.json` | thetao, °C @ 0.494 m | 5.8 / 1.3 MB | 〃 | `temperature` |
-| `current-ocean-waves-gfswave-0.25.json` | wave propagation u/v; magnitude = peak period (s) | 10.4 / 1.7 MB | GFS-Wave via `refresh_waves.py` | — |
-| `current-ocean-wave-height-gfswave-0.25.json` | significant wave height, m | 4.9 / 0.5 MB | 〃 (same download) | — |
+| `current-wind-surface-level-gfs-0.25.json` | 10 m u/v wind | 8.9 MB | GFS via `refresh_wind.py` | `surface` |
+| `current-wind-1000hpa-gfs-0.25.json` | u/v @ 1000 hPa | 9.0 MB | 〃 | `1000hpa` |
+| `current-wind-500hpa-gfs-0.25.json` | u/v @ 500 hPa | 9.3 MB | 〃 | `500hpa` |
+| `current-wind-10hpa-gfs-0.25.json` | u/v @ 10 hPa | 9.6 MB | 〃 | `10hpa` |
+| `current-temp-surface-level-gfs-0.25.json` | 2 m temperature, K | 5.9 MB | 〃 | `temperature` |
+| `current-rh-surface-level-gfs-0.25.json` | 2 m relative humidity, % | 5.0 MB | 〃 | `rh` |
+| `current-dewpoint-surface-level-gfs-0.25.json` | 2 m dew point, K | 5.9 MB | 〃 | `dew` |
+| `current-ocean-currents-cmems-0.25.json` | u/v currents @ 0.494 m | 11.2 MB | CMEMS via `refresh_ocean.py` | `currents` |
+| `current-ocean-currents-25m-cmems-0.25.json` | u/v currents @ 25.211 m | 11.2 MB | 〃 | `currents25` |
+| `current-ocean-currents-110m-cmems-0.25.json` | u/v currents @ 109.729 m | 11.1 MB | 〃 | `currents110` |
+| `current-ocean-currents-450m-cmems-0.25.json` | u/v currents @ 453.938 m | 11.0 MB | 〃 | `currents450` |
+| `current-ocean-temp-cmems-0.25.json` | thetao, °C @ 0.494 m | 5.8 MB | 〃 | `temperature` |
+| `current-ocean-waves-gfswave-0.25.json` | wave propagation u/v; magnitude = peak period (s) | 10.4 MB | GFS-Wave via `refresh_waves.py` | — |
+| `current-ocean-wave-height-gfswave-0.25.json` | significant wave height, m | 4.9 MB | 〃 (same download) | — |
 
 Sources and how they are shaped:
 
@@ -833,7 +920,13 @@ the next firing into a half-finished upload.
   **not** work: the ARCO zarr store serves `.zmetadata` and coordinate arrays publicly but
   returns 403 for every data chunk (verified across chunk indices and both dimension separators).
 - **R2**: `.env/r2` holds `R2_ACCOUNT_ID` and the S3-compatible key pair; the token is scoped to
-  one bucket with Object Read & Write only.
+  one bucket with Object Read & Write only. That pair uploads objects and **cannot deploy the
+  Worker** — different credential entirely.
+- **Deploying the Worker**: `cd worker && npx wrangler login` opens a browser for an OAuth flow
+  and caches the token in `~/.config/.wrangler/`, so it is once per machine, not once per deploy.
+  `npx wrangler deploy` thereafter. CI would need a `CLOUDFLARE_API_TOKEN` secret instead, which
+  is not set up — the Worker only changes when its own code does, never on a data refresh.
+  `worker/.wrangler/` is git-ignored: it caches the account id locally.
 
 
 ### Gotchas learned the hard way
@@ -884,6 +977,104 @@ the next firing into a half-finished upload.
   netCDF-only, NOMADS OPeNDAP is retired, OSCAR/jplOscar is stale. The working non-CMEMS fallback
   is NOAA CoastWatch ERDDAP `noaacwBLENDEDNRTcurrentsDaily` (0.25° blended geostrophic,
   `.ncoJson` + stride; needs curl — a python-urllib user agent gets 403).
+
+## Serving: latency, compression, lazy loading
+
+Everything above is about *what* the page draws. This is about how it arrives. Baseline, measured
+2026-08-24 against the deployed site from Tokyo, before any of it:
+
+| Step | Cost |
+|---|---|
+| HTML | 60 ms TTFB warm, 260 ms cold, 1.6 KB br |
+| 7 scripts, parallel over h2 | ~100 ms, ~250 KB br (d3 is 95 KB of it) |
+| parse + execute | ~50 ms desktop |
+| 3 topologies, parallel | ~130 ms, 430 KB br |
+| topojson feature/mesh/merge | ~95 ms desktop CPU |
+| **first weather byte requested** | — only now |
+| R2 fetch | +40 ms new-origin DNS/TLS, **300–800 ms TTFB**, 1.66 MB over **HTTP/1.1** |
+| `JSON.parse` of 9.4 MB | 51 ms desktop, 94 ms for the 11.7 MB ocean file |
+
+Where it stands now: the boot dataset is requested at **+13 ms**, and it arrives over h2 from an
+edge cache in **70–130 ms** instead of 300–800.
+
+Time to first data ≈ 1.2–1.7 s on a desktop near the edge, and worse everywhere else. Three
+things dominated, and they are worth separating because only one of them is about bytes.
+
+**The fetch started far too late.** The largest transfer on the page was issued after d3 and
+wind.js had downloaded, parsed, and resolved three topologies — several hundred milliseconds with
+the network doing nothing. An inline script in `<head>` now resolves `DATA_ROOT` and the boot
+layer's filenames itself and fires the fetch during HTML parse: **+13 ms instead of ~+400 ms**. It
+has to be inline; an external script would first cost the round trip it is there to remove. It
+therefore duplicates the layer → file map from `wind.js`, and `checkPreloadMap()` compares the two
+at boot and warns on drift. A miss is harmless — `loadGrid()` just fetches as before.
+
+It sits **above** the stylesheet link, which is not cosmetic: a pending stylesheet blocks the
+execution of every script after it, so below the `<link>` the prefetch would have waited on CSS.
+
+**r2.dev was the slowest link in the page**, and it is no longer in it. Not for want of
+compression — pre-compressed objects had solved that, and the Worker then
+[reversed the whole approach](#compression-uncompressed-objects-compressed-at-the-edge) — but
+because the endpoint itself is poor: it negotiates **HTTP/1.1 only** (no h2, no h3), it
+returns no `cf-cache-status` at all, meaning nothing is edge-cached, and its TTFB measured
+300–800 ms where Vercel answers the same page's assets in 60. Cloudflare also documents it as
+rate-limited and not for production. `worker/` is the fix, and it is **live**:
+`https://earth-data.globe-climatesim.workers.dev`, a Worker bound to the bucket, on
+`*.workers.dev` so it needs no domain, speaking h2/h3 and caching at the edge. `R2_DATA_ROOT`
+in `wind.js` and the `preconnect` + prefetch in `index.html` all point at it.
+
+Getting it right took four deploys, and the failures are the interesting part — every one of
+them was silent, and none showed up against a local miniflare bucket:
+
+- R2 reports a `range` on **every** object, so branching on `object.range` turned every plain GET
+  into a `206` — uncacheable, and browsers do not decompress a partial response. (Caught locally.)
+- The three brotli failures described under
+  [Compression](#compression-uncompressed-objects-compressed-at-the-edge), which ended with the
+  weather JSONs being stored uncompressed and the edge compressing them instead. Only the last of
+  these was visible from a browser rather than from `curl`, because `curl -H 'Accept-Encoding:
+  br'` and a real browser negotiate differently — the browser asked for zstd and got
+  `zstd(brotli(json))`. **Verify a change like this with an actual `fetch().json()`, not with
+  `curl`.**
+
+Deploying it needs a browser OAuth login (`npx wrangler login`); the keys in `.env/r2` are the
+S3-compatible pair, which cannot deploy a Worker.
+
+### What is fetched lazily, and what that costs
+
+- **The RealView renderer.** `js/sunlight.js` and its `libs/suncalc.js` dependency are 63 KB of
+  source serving three of sixteen layers, and every visit used to parse them. `wind.js` now
+  declares them in `DEFERRED_RENDERERS`; the first RealView selection loads them, and an idle
+  callback warms them once the first layer is on screen. **The boot path is what this buys, not
+  the bytes** — they are still fetched, just out of idle time. A plug-in that wants the old
+  behaviour can still be a plain `<script>` before `wind.js`; `registerRenderers()` reads
+  `window.EarthRenderers` either way.
+- **The 10m detail mesh, into a Worker.** Building it inline takes 437 ms in Chromium during which
+  a 16 ms heartbeat gets **zero ticks** — a hard freeze, arriving right after a zoom gesture.
+  Through `js/detail-worker.js` the worst tick is 17 ms. It costs latency to buy that: the result
+  lands ~1.6 s after the request instead of 0.44 s, almost all of it structured-clone
+  serialisation of three GeoJSON objects that are millions of two-element arrays. The right trade
+  *here* — the globe is already drawn in 50m detail and nothing is blocked on the sharpening — and
+  the wrong one for anything on the boot path. The inline build stays as a fallback, because
+  Workers cannot be constructed from `file:`.
+- **Datasets, on intent rather than on prediction.** A pointer settling on a menu button, or a
+  keyboard tab reaching it, starts that layer's downloads. Hovering is a strong signal that costs
+  nothing when it turns out to be wrong; speculatively pulling "probably 1000 hPa next" would
+  spend 1.5–2 MB on a coin flip, on a phone with someone else's data. `fetchJson()` owns every
+  in-flight raw fetch, so the boot prefetch, a warm and the real load share one request.
+- **Built grids are cached by URL.** Datasets are shared — surface wind backs four Atmosphere
+  layers, the CMEMS currents back two Ocean ones — so a six-layer walk that made ten requests now
+  makes four, and returning to a layer makes none. The cache is per page load, so `cache:
+  "no-cache"` still shows a refreshed dataset on reload.
+
+### Cache headers
+
+`/libs/` is immutable: vendored files pinned by name. `/js/` and `/css/` cannot be — no build step
+means no hash in the filename — so they are `max-age=0, stale-while-revalidate=600`: a reload or a
+back-navigation paints from cache and refreshes behind it, bounded to ten minutes of possible
+staleness. Not `must-revalidate`, which forbids exactly that stale serve. `/data/` (the
+topologies, which live in git) gains a `stale-while-revalidate=86400` window on top of its hour.
+
+The favicon is an inline `data:` URI. A file would have traded the old `/favicon.ico` 404 for a
+request; this costs neither.
 
 ## Fixed bugs
 
@@ -948,6 +1139,13 @@ Each entry is root cause → fix, with how it was verified.
 
 ## Version control / feature deployment structure
 
+- **Attribution is the git identity, and nothing else.** Every commit is authored and committed
+  solely as the configured `user.name` / `user.email`. A `Co-Authored-By:` trailer, a
+  `Generated with …` line, or any other tool or agent attribution must **never** appear in a
+  commit message, a PR title or a PR body — this holds however the change was written. The rule
+  lives here, in the tracked README, because the agent-facing copy in `AGENTS.md` is git-ignored
+  and therefore invisible to anyone cloning the repo.
+
 - **`main` is the only long-lived branch**, always deployable; Vercel's production deployment
   points at it. Everything else is short-lived: branch off `main`, build, verify, merge, delete.
   Vercel gives every branch a preview URL, which fits the screenshot-based visual verification
@@ -970,36 +1168,78 @@ Each entry is root cause → fix, with how it was verified.
   feature branches — the features share one engine, so divergence is the main risk and prompt
   merges are the cure.
 
-## Next steps
-
-- **`REFRESH_CADENCE=daily` is still untested.** It drops cron strings rather than running a gate,
-  so confirm a skipped slot logs nothing and consumes no runner before relying on it. Related:
-  GitHub disables cron in repos idle for 60 days (a warning email comes first) — the last push was
-  2026-08-21, so that clock runs out around **2026-10-20**.
-- **Verify the first CI run of the brotli upload.** The upload path is proven locally end to end
-  (all 14 objects re-served with `Content-Encoding: br`, byte-identical after decode), but the
-  runner installs `brotli` from apt and has never executed that step. The 06:45 UTC anchor is the
-  one that exercises all 14 files — and since run history is trimmed by hand, check it while it is
-  still in the Actions tab, or confirm from the bucket afterwards.
-- **Bucket custom domain.** No longer needed for compression — that is solved by pre-compressed
-  objects ([Compression](#compression-pre-compressed-objects-not-edge-compression)). What remains
-  is that r2.dev is rate-limited and documented as not-for-production, and that a custom domain
-  gives a hostname independent of the bucket id. Still a one-line `R2_DATA_ROOT` change, and the
-  old URL keeps working during the transition.
-- **More depth levels, if wanted.** The registry now scales cheaply: one `PRODUCTS` entry, one
-  `LAYERS` entry, one menu button. 15.8 m is the obvious remaining pick, though it sits close
-  enough to 25.211 m that the two may not read as different. Each level costs ~11 MB raw
-  (~1.8 MB on the wire) and ~20 s on the anchor slot.
-- **Favicon.** The only console noise left on every page load is a 404 for `/favicon.ico`.
-- **Hash reading is still boot-only.** Write-back is done; a `hashchange` listener that re-reads
-  the hash live would make hand-edited URLs work without a reload.
-- **Local venv is disposable.** `~/.venvs/aws` holds pygrib, numpy, copernicusmarine and the AWS
-  CLI, and nothing depends on it surviving — the workflow builds its own on every run. Recreate with
-  `python3 -m venv ~/.venvs/aws && ~/.venvs/aws/bin/pip install --upgrade pygrib numpy
-  copernicusmarine awscli` (the system Python is PEP-668 managed, so a plain `pip3 install` fails).
-  Local uploads additionally need the `brotli` binary on `PATH`.
-
 ## Changes
+
+### 2026-08-24 (later)
+
+The Worker went live, and taking it live reversed the compression design.
+
+- **`earth-data.globe-climatesim.workers.dev` is deployed and in the serving path.**
+  `R2_DATA_ROOT` and the `preconnect` + prefetch point at it. TTFB on a cache hit is
+  **70–130 ms** against r2.dev's 300–800, over h2 instead of HTTP/1.1.
+- **The weather JSONs are stored uncompressed and the edge compresses them.** Three deploys
+  produced three silent failure modes trying to keep the pre-compressed objects — double
+  brotli, live re-compression, and finally the edge stripping `Content-Encoding` and leaving
+  clients with brotli bytes labelled `application/json`. The Workers runtime has no brotli
+  decompressor, so it cannot hand the edge something the edge will encode itself. Costs
+  **19.9 → 25.7 MB** across the set (the edge compresses below `brotli -q 9`); buys correctness
+  and the TTFB above. Full reasoning under
+  [Compression](#compression-uncompressed-objects-compressed-at-the-edge).
+- **`worker/index.js` is a third smaller** — no `encodeBody`, no `no-transform` on the JSONs, no
+  encoding-keyed cache, no r2.dev fallback. `no-transform` is kept for the imagery only, where
+  an edge-side image transform would corrupt pixels that get read back.
+- `upload_data.sh` drops brotli, and the refresh workflow no longer installs it.
+- The 24 WebP texture objects were uploaded and verified before the switch, so RealView never
+  broke. The superseded `bluemarble-*.jpg` base objects are kept on purpose: `Release-v1.0`
+  predates the WebP switch and rolls back to them.
+
+**The lesson worth keeping**: `curl -H 'Accept-Encoding: br'` and a real browser negotiate
+differently. Two of the three failures looked fine under `curl` and broke in a browser, which
+asked for zstd. Verify an encoding change with an actual `fetch().json()`.
+
+### 2026-08-24
+
+A serving pass: latency, compression and lazy loading. Nothing about what the globe draws
+changed. See [Serving](#serving-latency-compression-lazy-loading) for the reasoning; the
+measurements below are all from that date.
+
+- **The boot dataset is prefetched during HTML parse.** It used to be requested only after d3 and
+  `wind.js` had downloaded, parsed and resolved three topologies — **+13 ms now against roughly
+  +400 ms**, with the network previously idle for all of it. An inline script in `<head>`, above
+  the stylesheet because a pending stylesheet blocks the scripts after it. It duplicates the
+  layer → file map, so `checkPreloadMap()` compares the two at boot and warns on drift.
+- **Built grids are cached by URL.** Datasets are shared across layers, so a six-layer walk that
+  made ten requests now makes four, and returning to a layer makes none.
+- **`worker/`: a Cloudflare Worker in front of the bucket.** r2.dev negotiates HTTP/1.1 only,
+  returns no `cf-cache-status`, and answers in 300–800 ms against Vercel's 60. Written and
+  verified against a local miniflare bucket — including the two things that testing caught:
+  `encodeBody: "manual"` (or the runtime brotli-compresses an already-brotli body) and guarding
+  the range branch on the *request* (R2 reports a range on every object, so plain GETs became
+  206s). **Not deployed** — see Next steps.
+- **Blue Marble → WebP, plus a 10800 tier.** Base 1.78 → 0.99 MB mean at SSIM 0.985 (21.4 → 11.8
+  MB over the twelve months); the new mid tier averages 3.53 MB where crossing `DETAIL_ZOOM` used
+  to pull a whole ~23 MB master. At 3.5× on the August composite the two
+  renders are indistinguishable. Night lights and elevation are deliberately untouched: lossy
+  WebP takes the night lights' unlit-backdrop leakage from 2/255 to 22/255, against ~1.4 tolerable.
+- **The 10m detail mesh moved into a Worker.** Inline it froze the main thread for 437 ms — zero
+  heartbeat ticks — right after a zoom gesture. Worst tick is now 17 ms, at the cost of the result
+  landing ~1.6 s out instead of 0.44 s, which is the right way round for a progressive sharpening.
+- **`sunlight.js` + `suncalc.js` left the boot path**, deferred behind `DEFERRED_RENDERERS` and
+  warmed at idle: 63 KB of source that three of sixteen layers need.
+- **Datasets prefetch on intent** — pointer or keyboard focus on a menu button — rather than on an
+  idle guess, which would spend 1.5–2 MB on a coin flip.
+- **Cache headers**: `/js/` and `/css/` gain `stale-while-revalidate=600` (they cannot be
+  immutable without a build step); `/data/` gains an 86400 s window. The favicon is an inline
+  `data:` URI, so the old `/favicon.ico` 404 is gone without adding a request.
+- **Attribution policy** written into this README, and the two commits predating it rewritten to
+  drop a `Co-Authored-By` trailer.
+
+Considered and dropped: skipping `js/tz-centers.js` when `#rotate=` is present (~5 KB, but
+`wind.js` reads the table synchronously at boot, so it needs either `document.write` or moving
+`wind.js` to dynamic injection to preserve order); progressive JPEG for the files that stay JPEG
+(8% of the bytes for extra decode time on the files whose decode cost the pipeline is built
+around); and a binary Int16 weather format (1.65 → 1.38 MB on the wire and no `JSON.parse`, but it
+touches all three refresh scripts and `buildGrid` — worth revisiting on its own).
 
 ### 2026-08-23
 
@@ -1085,13 +1325,63 @@ Each entry is root cause → fix, with how it was verified.
       full-resolution cropped `drawImage` off the 21600 master costs **4 ms** and the `getImageData`
       after it a few hundred — once per settle, never per frame. A pyramid would have meant ~900
       sliced objects, an index to serve them, and a per-pixel dispatch across tile edges.
-    - **Cheap degrees stay cheap.** The two axes cap independently at `DETAIL_MAX_CROP`. Near a pole
-      the window spans all 360° of longitude but a narrow latitude band, and longitude is precisely
-      where degrees are cheap — capping them together would have thrown away latitude resolution to
-      pay for longitude nobody can see.
-    - **The cap is not a compromise where it matters.** At 2.5× the window is widest and 3072 px is
-      26 px/deg against the ~16 the screen resolves; by 6× the window has shrunk inside the cap and
-      the crop is the master's own 60. Raising the cap would buy nothing a screen can show.
+    - **Cheap degrees are spent, not just excused.** The readback budget is an *area*, and
+      `cropSize()` splits it between the axes in the ratio the screen asks in — `spanλ · cos(φ)`
+      against `spanφ`, both degrees of arc. Capping each axis at the same number instead was the
+      one place the crop lost to the texture it replaced. `cropWindow()` must take all 360° of
+      longitude the moment the visible cap touches a pole, which at 3× is any view centred past
+      36°, so an equal cap put 4096 px across 360° of longitude and the same 4096 across 109° of
+      latitude: 11 px/deg in the axis the viewer is looking across, 30 in the axis they are not,
+      against the base plate's 15 in both. Splitting the same readback by demand gives 7437 × 2256
+      — 21 px/deg each way, clear of the base plate in both axes. Measured headless at 51.5°N and
+      3×, east-west detail rises **×1.42** with north-south unchanged at ×0.99; at the equator,
+      where the split is near square anyway, the larger budget alone is worth ×1.11 and ×1.15.
+    - **The cap was a compromise, and it was the binding one.** At 3.5× on a 1600×900 viewport the
+      21600 master offers 6221 px across the window and the old 3072 took half of them — tighter
+      than the *mid* tier's own 10800, so below ~3.8× the two tiers were producing byte-identical
+      crops and the master's extra 20 MB bought nothing. 4096 is worth ~30% more px/deg through the
+      4–6× band. It stops there because this is `getImageData` into the JS heap, not a GPU
+      allocation, and Night Lights cuts two planes: 8192² would be 537 MB for the pair.
+    - **Re-cut on detail, not on zoom travelled.** `worthRecutting()` compares what the crop
+      carries against `projection.scale() · π/180 · overlayScale()` — what the screen is asking
+      for — instead of re-cutting once the zoom had grown a fixed 1.6×. That ratio was wrong at
+      both ends: a crop cut at 2.5× stayed in service to 3.99×, carrying 23 px/deg against the 51
+      a Retina screen wanted, while above ~6.5× — where the crop is already at the master's native
+      60 and a re-cut cannot add a pixel — it went on paying the readback anyway. `DETAIL_REGAIN`
+      is what keeps the new rule from looping once the master itself is the limit.
+    - **`overlayScale()` is part of the arithmetic, everywhere.** `render()` draws at
+      `projection.scale() · overlayScale` backing-store px, so on a Retina display the imagery is
+      asked for twice the detail a CSS-pixel figure assumes and every grid runs out at half the
+      zoom quoted: the 5400 base at 1.3× rather than 2.6×, the master at ~4.5× rather than 10×.
+      `DETAIL_ZOOM` and `MID_ZOOM` were both CSS-pixel constants and are gone; `worthCropping()`
+      and `chooseMaster()` read `screenDetail()`, which carries `overlayScale` and the viewport.
+      Measured headless at dpr 2, 2× over the Atlantic: **×1.37** east-west and **×1.44**
+      north-south, from the crop now engaging where it previously would not. At dpr 1 the same
+      views are unchanged to within 0.02%.
+    - **A hemisphere is 180° of longitude, not 360°.** `visibleCap()` clamps its `asin` argument at
+      1, so any view whose viewport diagonal overshoots the globe reports `r = 90°` exactly — most
+      of the range below ~2.4× — and `capHalfSpan()`'s `|φc| + r >= 90` sent every one of them down
+      the full-circle path. A cap centred on the equator covers `λc ± 90` at *every* latitude, so
+      180° was the answer and 360° was double, on the widest windows there are, where `cropSize()`
+      has least room to absorb it. The bail is now `> 90`, for caps that contain a pole in their
+      interior. This is most of what the Retina figure above is made of.
+    - **Comparing two grids is not the same question as scoring one.** `plateDetail()` reports a
+      plate's *weakest* axis, which is right for how sharp a crop looks and wrong for whether one
+      crop beats another. At 68°N and 6× both grids pin longitude to `DETAIL_MAX_AXIS`, so their
+      weakest axes match and a `min()` comparison called it a tie — while the master carried a
+      quarter more latitude detail. Cutting the cheap tier there measured **×0.50** on Siberian
+      river country. `chooseMaster()` compares axis by axis instead, and treats a per-axis loss as
+      an artefact of how the budget was spent rather than as a disqualification: near a pole the
+      mid tier's crop fits the budget whole and spends the slack on longitude, so the master trades
+      longitude for latitude, and it is still the better source.
+    - **`DETAIL_MAX_AXIS` stays at 8192, against the arithmetic.** Memory is bounded by
+      `DETAIL_BUDGET`, not by this, so 16384 is free and on paper pays 12–18% of `plateDetail()`
+      above ~65°N past 5×. Rendered, it lost: at 70°N/7×, 68°N/6× and 67°N/5× the wider strip came
+      back with 4–6% more east-west detail and 7–12% *less* north-south, a net loss in all three.
+      `worstLat()` scores longitude at the most equatorward latitude in the window, which near a
+      pole is the foreshortened rim rather than the middle of the screen, so the split already
+      leans further into longitude than the view wants and the ceiling was correcting for it. The
+      weighting is the thing to fix; until then the ceiling stays.
     - **Loaded on the settle**, like the 10m coastline: `ensureDetail()` is called from `render()`,
       never from `preview()`, so no drag frame waits on a 21 MB fetch. Zooming back out releases the
       crop. One failure sets `detailFailed` and the layer stays on the 5400 imagery rather than
@@ -1309,8 +1599,9 @@ Each entry is root cause → fix, with how it was verified.
   is the ground truth.
 - **Corrected the edge-compression claim.** The r2.dev URL serves the weather JSONs with no
   `Content-Encoding` under either `--compressed` or an explicit `Accept-Encoding: gzip`, so the
-  "~10 MB → ~2.5 MB" note was wrong; Brotli for the data needs a bucket custom domain, now a
-  [Next step](#next-steps).
+  "~10 MB → ~2.5 MB" note was wrong; Brotli for the data needs a bucket custom domain. Superseded
+  twice since — first by pre-compressed objects, then by the Worker's edge compression
+  ([Compression](#compression-uncompressed-objects-compressed-at-the-edge)).
 - **Documented two footguns** found while wiring the workflow: `refresh_wind.py` silently treats an
   unrecognized product name as a local GRIB path, and `#location`'s hardcoded placeholder mentions
   wind speed on every layer.

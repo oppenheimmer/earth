@@ -35,7 +35,7 @@ jobs:
       - name: Install GRIB + CMEMS tooling
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q libeccodes-dev brotli   # GRIB decoder backend; brotli for the upload
+          sudo apt-get install -y -q libeccodes-dev   # GRIB decoder backend
           pip install pygrib numpy copernicusmarine
       - name: Refresh GFS atmosphere (anonymous)
         run: |
@@ -55,8 +55,9 @@ jobs:
           COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
           COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
         run: python scripts/refresh_ocean.py
-      # Objects ship pre-compressed (Content-Encoding: br) because r2.dev never
-      # compresses on the fly; see scripts/upload_data.sh.
+      # Objects ship uncompressed; the Worker's edge compresses them per client.
+      # This used to pre-compress with brotli — see scripts/upload_data.sh for why
+      # that reversed, and the README's Compression section for the measurements.
       - name: Upload to R2
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}

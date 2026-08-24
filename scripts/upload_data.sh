@@ -4,13 +4,28 @@
 # JSONs are git-ignored; js/wind.js fetches them from R2_DATA_ROOT when not
 # on localhost).
 #
-# Objects are stored PRE-COMPRESSED with Content-Encoding: br. The r2.dev
-# development URL never compresses on the fly (verified 2026-08-17 and again
-# 2026-08-21: no Content-Encoding even when the client offers gzip/br/zstd),
-# but R2 does serve a stored encoding, and Cloudflare transparently decodes
-# for clients that do not accept it. So this buys ~5.9x off the wire today,
-# with no custom domain and no change to wind.js — the object KEY keeps the
-# plain .json name, so every URL is unchanged.
+# Objects are stored UNCOMPRESSED, and the edge compresses them. This reverses
+# the earlier design, for a reason that only appeared once a CDN went in front.
+#
+# Storing pre-compressed bodies with Content-Encoding: br existed because the
+# r2.dev URL never compresses on the fly (verified 2026-08-17 and 2026-08-21),
+# so it was the only way to get anything off the wire. The Worker in worker/
+# removes that premise, and keeping both fought the platform: three deploys and
+# three distinct failure modes, all measured against the live Worker, ending
+# with the edge stripping Content-Encoding and clients receiving brotli bytes
+# labelled application/json. The Workers runtime has no brotli decompressor, so
+# a Worker cannot hand the edge something it will re-encode itself.
+#
+# Plain JSON is what the platform wants: the edge negotiates br, zstd or gzip
+# per client and caches a variant for each. It costs bytes — the edge compresses
+# at a lower level than brotli -q 9 did, measured 722 KB against 543 KB on the
+# wave-height file, about +33% — and it is worth it, because the same change
+# takes TTFB from 300-800 ms on r2.dev to 70-130 ms on a cache hit, which
+# dominates for a file this size. Storage goes from ~20 MB to ~119 MB, which
+# costs pennies.
+#
+# Nothing about the object KEYS changes, so no URL moves and wind.js is
+# unaffected. brotli is no longer needed on PATH.
 #
 # R2 is S3-compatible, so this uses the AWS CLI (preinstalled on GitHub
 # runners; locally: pip install awscli). Required environment:
@@ -27,31 +42,19 @@ set -euo pipefail
 : "${R2_ACCOUNT_ID:?set R2_ACCOUNT_ID}"
 : "${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}"
 : "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
-command -v brotli >/dev/null || { echo "brotli not found (apt install brotli)" >&2; exit 1; }
 BUCKET="${R2_BUCKET:-earth-data}"
 ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-# q9 is the knee of the curve: measured over all 12 datasets it beats gzip -9
-# (17.3 MB vs 18.9 MB total) at a third of the CPU, while q11 costs ~7 s per
-# file for another ~7%. Raw total is ~102 MB.
-BROTLI_QUALITY="${BROTLI_QUALITY:-9}"
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-
 cd "$(dirname "$0")/../public/data"
 for f in current-*.json; do
-    brotli -q "$BROTLI_QUALITY" -c "$f" > "$WORK/$f.br"
-    raw=$(wc -c < "$f")
-    enc=$(wc -c < "$WORK/$f.br")
-    # max-age matches the old vercel.json data header; must-revalidate keeps
-    # browsers honest across the 6-hourly refresh cadence.
-    aws s3 cp "$WORK/$f.br" "s3://${BUCKET}/${f}" \
+    # max-age matches the vercel.json data header; must-revalidate keeps browsers
+    # honest across the 6-hourly refresh cadence. No content-encoding: the object
+    # is plain JSON and the edge encodes it per request.
+    aws s3 cp "$f" "s3://${BUCKET}/${f}" \
         --endpoint-url "$ENDPOINT" \
         --content-type "application/json" \
-        --content-encoding "br" \
         --cache-control "public, max-age=1800, must-revalidate" \
         --only-show-errors
-    awk -v f="$f" -v r="$raw" -v e="$enc" \
-        'BEGIN {printf "uploaded %-46s %5.1f MB -> %4.1f MB  (%.1fx)\n", f, r/1048576, e/1048576, r/e}'
+    awk -v f="$f" -v r="$(wc -c < "$f")" \
+        'BEGIN {printf "uploaded %-46s %5.1f MB\n", f, r/1048576}'
 done

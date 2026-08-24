@@ -1,0 +1,20 @@
+# Deploy with:  cd worker && npx wrangler deploy
+#
+# wrangler opens a browser for an OAuth login the first time; it needs no token in .env/r2
+# (those keys are the S3-compatible pair that upload_data.sh uses, which cannot deploy a
+# Worker). The result is https://earth-data.<your-subdomain>.workers.dev — put that, with a
+# trailing slash, into R2_DATA_ROOT at the top of the orchestration section in public/js/wind.js
+# and into the preconnect + inline prefetch in public/index.html.
+
+name = "earth-data"
+main = "index.js"
+compatibility_date = "2026-08-24"
+
+# The binding is a direct read of the bucket, not a round trip through its public endpoint.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "earth-data"
+
+# Nothing here is user-specific, so keep the observability default off-by-cost rather than on.
+[observability]
+enabled = true

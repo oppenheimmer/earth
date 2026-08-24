@@ -8,6 +8,25 @@
 # native 13500x6750, GEBCO at 2700x1350. These are what sunlight.js swaps in past
 # DETAIL_ZOOM, and they are fetched lazily by the browser, one window at a time.
 #
+# The Blue Marble files are re-encoded to WebP, and gain a third tier between the
+# other two. Both are about what crosses the wire (measured 2026-08-24):
+#
+# Means across the twelve months, with the spread, since these vary a good deal by
+# season — August is the smallest of them and January/December the largest:
+#
+#   base   5400x2700   1.78 MB jpeg -> 0.99 MB webp q85 (0.85-1.08), total 21.4 -> 11.8 MB
+#   mid   10800x5400                   3.53 MB webp q85 (3.10-3.87), total 42.3 MB   NEW
+#   deep  21600x10800 23.27 MB jpeg (21.79-24.49), unchanged — WebP stops at 16383 px
+#
+# The mid tier matters more than the halved base. 5400 carries 15 px/deg and runs out
+# at 2.5x zoom, which is DETAIL_ZOOM; 10800 carries 30 and runs out at 5x. Before this,
+# crossing 2.5x pulled a whole ~23 MB master to read one window out of it, so a
+# viewer who zoomed a little paid as if they had zoomed all the way. Now they pay
+# ~3.5 MB, and only a view past 5x reaches for the master.
+#
+# The night lights and the elevation map are deliberately NOT re-encoded — see the
+# note above each below.
+#
 # Of BMNG's three relief variants this takes "world.topo" — land topography only.
 # The "world.topo.bathy" sibling adds bathymetric shading, which lifts the deep
 # ocean to a mid blue and draws the mid-ocean ridges; the plain composite keeps
@@ -19,13 +38,15 @@
 # the files to R2 with scripts/upload_textures.sh. Already-downloaded files are
 # skipped unless FORCE=1.
 #
-#   ./scripts/fetch_textures.sh              # ~285 MB: base set + the deep-zoom masters
-#   SKIP_HIRES=1 ./scripts/fetch_textures.sh # ~22 MB, base set only
+#   ./scripts/fetch_textures.sh              # ~365 MB: base set + masters + the two WebP tiers
+#   SKIP_HIRES=1 ./scripts/fetch_textures.sh # ~34 MB, base set only (no mid tier either:
+#                                            #   it is resampled from the deep-zoom master)
 #   FORCE=1 ./scripts/fetch_textures.sh      # re-download everything
 #
 # Both collections are NASA Earth Observatory imagery, free of copyright.
 #
-# Needs curl, and ffmpeg for the one downscale below.
+# Needs curl, ffmpeg for the resamples below, and cwebp (libwebp) for the Blue
+# Marble encodes.
 set -euo pipefail
 
 cd "$(dirname "$0")/../public/data"
@@ -48,6 +69,13 @@ MONTHS=(january february march april may june july august september october nove
 # pixel-to-pixel detail (17.3 vs 15.4), and its ringing costs nothing that matters —
 # worst unlit-backdrop leakage through the r-0.6b light extraction rises to 1.4/255,
 # still eight times below the dimmest settlement the extraction has to keep.
+#
+# Not re-encoded to WebP, for the same reason this file is not a JPEG re-encode of a
+# smaller source: the pixels are read back, not looked at. Running the r-0.6b extraction
+# over a WebP of this file (measured 2026-08-24) lifts worst unlit-backdrop leakage from
+# 2/255 to 22/255 at q85 and 12/255 even at q95, against the 1.4/255 the extraction can
+# absorb — WebP spends its bit budget on the 99.9% of this image that is black, and the
+# lights are what it rounds off. Lossless WebP is clean but 3.6 MB against 1.34 MB.
 LIGHTS="https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144898/BlackMarble_2016_3km.jpg"
 LIGHTS_OUT="blackmarble-2016-5400.jpg"    # name carries the grid: the R2 objects are immutable
 LIGHTS_HI="blackmarble-2016-13500.jpg"    # the 3 km file kept as-is, for the deep-zoom crop
@@ -64,6 +92,9 @@ LIGHTS_HI="blackmarble-2016-13500.jpg"    # the 3 km file kept as-is, for the de
 # and 1 MB of retained heap against 38 MB. At RELIEF_STRENGTH 0.05 the two are hard to
 # tell apart on the globe. Change the scale below and the name in sunlight.js together
 # if a sharper one is ever wanted.
+#
+# Not WebP either, lossy or lossless: same gradient argument as below, and at 0.18 MB
+# the file is already too small for the question to be interesting.
 #
 # PNG, not JPEG, and this is not a preference: JPEG's ringing injects ~28% noise into
 # the gradient, measured, which is the exact quantity the shading consumes. Lossless
@@ -82,9 +113,30 @@ get() {  # get <url> <dest>
     awk -v f="$2" -v n="$(wc -c < "$2")" 'BEGIN {printf "%-24s %5.1f MB\n", f, n/1048576}'
 }
 
+command -v cwebp >/dev/null || { echo "cwebp (libwebp) is required to encode the Blue Marble" >&2; exit 1; }
+
+# q85 by measurement, not by habit: against the source JPEG it scores SSIM 0.985 (q78
+# 0.980, q90 0.991) and halves the file. This imagery is only ever sampled as colour, so
+# there is no readback to protect the way the night lights and the elevation map have.
+BM_QUALITY=85
+
+encode_webp() {  # encode_webp <src> <dest> [resize-w resize-h]
+    if [[ -s "$2" && -z "${FORCE:-}" ]]; then
+        printf "%-28s exists, skipped\n" "$2"
+        return
+    fi
+    cwebp -quiet -q "$BM_QUALITY" -m 4 ${3:+-resize "$3" "$4"} "$1" -o "$2.part"
+    mv "$2.part" "$2"
+    awk -v f="$2" -v n="$(wc -c < "$2")" 'BEGIN {printf "%-28s %5.1f MB\n", f, n/1048576}'
+}
+
 for m in "${!MONTHS[@]}"; do
     mm=$(printf "%02d" $((m + 1)))
+    # The JPEG is an intermediate now, not an output: it is what NASA publishes, and the
+    # WebP beside it is what the browser fetches. Kept on disk so a re-run with a changed
+    # BM_QUALITY re-encodes without re-downloading 21 MB; delete them to reclaim ~21 MB.
     get "${BMNG}/${MONTHS[m]}/world.topo.2004${mm}.3x5400x2700.jpg" "bluemarble-2004${mm}.jpg"
+    encode_webp "bluemarble-2004${mm}.jpg" "bluemarble-2004${mm}.webp"
 done
 
 # The deep-zoom masters: same composites on NASA's 21600x10800 grid, 60 px/deg against the
@@ -96,6 +148,12 @@ if [[ -z "${SKIP_HIRES:-}" ]]; then
     for m in "${!MONTHS[@]}"; do
         mm=$(printf "%02d" $((m + 1)))
         get "${BMNG}/${MONTHS[m]}/world.topo.2004${mm}.3x21600x10800.jpg" "bluemarble-2004${mm}-21600.jpg"
+        # The mid tier, resampled straight out of the master rather than fetched: NASA
+        # publishes 5400 and 21600 and nothing between. cwebp's own -resize is used
+        # instead of an ffmpeg hop because a 10800x5400 PNG intermediate is ~300 MB;
+        # measured SSIM 0.986 against the lanczos route, and slightly smaller with it.
+        # Costs ~4.5 s and ~1.6 GB of RSS per month, sequentially, in a one-off script.
+        encode_webp "bluemarble-2004${mm}-21600.jpg" "bluemarble-2004${mm}-10800.webp" 10800 5400
     done
 fi
 if [[ -s "$LIGHTS_OUT" && -s "$LIGHTS_HI" && -z "${FORCE:-}" ]]; then
