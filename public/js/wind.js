@@ -490,7 +490,12 @@
     // particle trail that strays past the coastline.
     function drawMap(fast) {
         if (!mesh) return;
-        if (!fast) ensureDetailMesh();
+        if (!fast) {
+            // Every full-detail draw goes through here, whatever asked for it, so this is
+            // the one place the "sharp supersedes pending-fast" rule cannot be forgotten.
+            cancelManipulationFrame();
+            ensureDetailMesh();
+        }
         var detail = !fast && mesh10 && projection.scale() / initialScale > DETAIL_ZOOM;
 
         function strokeOn(ctx, path, geometry, alpha, width) {
@@ -774,6 +779,44 @@
             lastPreviewTime = now;
             drawOverlayPreview();
         }
+    }
+
+    /**
+     * One manipulation repaint per animation frame, however many input events arrive.
+     * The handlers used to draw inline, which meant a frame's worth of pointer events —
+     * a pinch delivers one per finger that moved — each paid for a full drawMap(true).
+     * On a mid-range phone that call is 60-100 ms of vector work by itself, so the extra
+     * draws could only queue work the display was never going to show. Now the handlers
+     * just move the projection and ask for a frame; the projection is read at draw time,
+     * so the frame always paints the newest state and the last event is never dropped.
+     */
+    var frameRequested = 0;   // rAF handle of a pending manipulation draw, 0 when none
+    function drawManipulationFrame() {
+        if (frameRequested) return;
+        frameRequested = requestAnimationFrame(function () {
+            frameRequested = 0;
+            drawMap(true);
+            previewOverlayThrottled();
+        });
+    }
+
+    /**
+     * Drop a manipulation frame that has not run yet, because a full-detail draw is about to
+     * supersede it.
+     *
+     * Without this the two are racing. The frame is asked for as the gesture moves; the
+     * settling redraw is on scheduleRecompute's 200 ms timer. Normally the frame wins by an
+     * order of magnitude and the sharp draw lands last, which is the order that matters —
+     * but they only have to be reordered once for the pending frame to repaint the same
+     * projection from the *low-detail* meshes on top of the sharp one, leaving the globe
+     * coarse until something else touches it. A backgrounded tab produces that order every
+     * time: animation frames stop while timers keep firing. So does any device slow enough
+     * for a draw to overrun its frame, which is the device this coalescing exists for.
+     */
+    function cancelManipulationFrame() {
+        if (!frameRequested) return;
+        cancelAnimationFrame(frameRequested);
+        frameRequested = 0;
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -1625,8 +1668,7 @@
                 var λ = rotateStart[0] + (event.x - pointerStart[0]) * sensitivity;
                 var φ = rotateStart[1] - (event.y - pointerStart[1]) * sensitivity;
                 projection.rotate([λ, Math.max(-90, Math.min(90, φ)), rotateStart[2]]);
-                drawMap(true);
-                previewOverlayThrottled();
+                drawManipulationFrame();
             })
             .on("end", function (event) {
                 if (pinching) return;
@@ -1645,8 +1687,7 @@
             startManipulation();
             var k = Math.exp(-event.deltaY * 0.0018);
             projection.scale(clampScale(projection.scale() * k));
-            drawMap(true);
-            previewOverlayThrottled();
+            drawManipulationFrame();
             scheduleRecompute();
         }, {passive: false});
 
@@ -1655,6 +1696,17 @@
         // reuses the wheel's clamp so both paths stop at the same 0.5x-MAX_ZOOM limits.
         // #display sets touch-action: none, without which the browser would consume
         // the gesture as a page zoom and no touchmove would arrive.
+        //
+        // Capture phase, and that is load-bearing rather than incidental. d3.drag's touch
+        // handlers call stopImmediatePropagation for every changed touch that still owns a
+        // gesture, and finger 1 owns one for the whole pinch — the filter above only ever
+        // rejected finger 2. Listening on the bubble phase therefore lost every event in
+        // which finger 1 moved, which on a real hand is nearly all of them: the zoom
+        // advanced only on the frames where the anchor finger happened to be still, and
+        // the closing touchend was swallowed too whenever finger 1 was the last to lift,
+        // leaving `pinching` set and the globe unrotatable until reload. Capturing on
+        // #display runs these handlers before d3 gets the chance.
+        var CAPTURE = {passive: false, capture: true};
         var node = display.node();
         node.addEventListener("touchstart", function (event) {
             if (event.touches.length !== 2) return;
@@ -1663,28 +1715,27 @@
             pinchStartDist = touchSpread(event.touches);
             pinchStartScale = projection.scale();
             startManipulation();
-        }, {passive: false});
+        }, CAPTURE);
 
         node.addEventListener("touchmove", function (event) {
             if (!pinching || event.touches.length !== 2 || !pinchStartDist) return;
             event.preventDefault();
             projection.scale(clampScale(pinchStartScale * touchSpread(event.touches) / pinchStartDist));
-            drawMap(true);
-            previewOverlayThrottled();
-        }, {passive: false});
+            drawManipulationFrame();
+        }, CAPTURE);
 
         function endPinch(event) {
             if (!pinching || event.touches.length > 0) return;  // hold until every finger lifts
             pinchStartDist = 0;
             scheduleRecompute();
             // Clear on the next tick, not synchronously: a d3.drag "end" can fire from
-            // this same touchend (finger 1 was down before finger 2 landed) and the
-            // listener order between d3's handler and this one is not guaranteed, so the
-            // flag has to outlive the event turn for its guards to hold.
+            // this same touchend (finger 1 was down before finger 2 landed), and capturing
+            // puts that handler *after* this one, so the flag has to outlive the event turn
+            // or the lift would end the gesture with a click readout.
             setTimeout(function () { pinching = false; }, 0);
         }
-        node.addEventListener("touchend", endPinch);
-        node.addEventListener("touchcancel", endPinch);
+        node.addEventListener("touchend", endPinch, CAPTURE);
+        node.addEventListener("touchcancel", endPinch, CAPTURE);
     }
 
     var resizeTimer = null;

@@ -951,11 +951,29 @@ the next firing into a half-finished upload.
   `Selected depth:` line is worth reading anyway.
 - `pkill -f "http.server 8421"` matches **its own command line** and kills the shell running it.
   Use a recorded PID, or a pattern that cannot match the killer.
-- **`isMobile()` is a user-agent regex, and privacy browsers lie.** Its only effect is
-  `PARTICLE_REDUCTION` in the engine and halving `TEXTURE_MAX_WIDTH` in the renderer — but a
-  browser spoofing a desktop UA (common in ad-blocking and privacy builds) gets the full desktop
-  particle count and full-size textures on phone hardware, which looks exactly like "the render
-  got slow" and has nothing to do with the layer being viewed.
+- **`isMobile()` is a user-agent regex, and privacy browsers lie.** It gates four things, not
+  the two this note used to list:
+
+  | Branch | Desktop | Mobile | Where |
+  |---|---|---|---|
+  | Particle count | ×1.0 | ×`PARTICLE_REDUCTION` (0.75) | `wind.js` `animate()` |
+  | Colour texture decode cap | `TEXTURE_MAX_WIDTH` (5400) | 2700 | `sunlight.js` `buildTexture()` |
+  | Elevation decode cap | 2700 | 1350 | `sunlight.js` `buildRelief()` |
+  | Deep-zoom crop tier | engaged | **skipped entirely** | `sunlight.js` `ensureDetail()` |
+
+  The last one is the big one and is easy to miss: phones keep the 5400 masters at every zoom,
+  so the 10800 and 21600 tiers never load there and the ×1.37/×1.44 crop gain measured below is
+  desktop-only. That is deliberate — the deep master is 21 MB and its decode is the one
+  allocation a phone cannot absorb — but it means "mobile is softer at high zoom" is by design,
+  not a bug to go hunting.
+
+  A browser spoofing a desktop UA (common in ad-blocking and privacy builds) gets the full
+  desktop particle count, full-size textures *and* the deep-zoom fetch on phone hardware, which
+  looks exactly like "the render got slow" and has nothing to do with the layer being viewed.
+
+  The same regex is why a phone-shaped viewport is not a phone: emulating metrics and touch
+  without overriding the user agent leaves every branch above on its desktop side. `test/`
+  carries real user agents in `lib/devices.mjs` for exactly this reason.
 - **ffmpeg infers muxer *and codec* from the file extension, and `.part` tells it neither.**
   `fetch_textures.sh` writes through a `.part` temporary like every other download here, so both
   must be spelled out. Omitting `-f image2` fails loudly ("Unable to choose an output format",
