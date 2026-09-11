@@ -19,6 +19,7 @@ import {promises as fs} from "node:fs";
 import {dirname, join, resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 import {promisify} from "node:util";
+import {tmpdir} from "node:os";
 import {launch} from "./lib/browser.mjs";
 import {serve} from "./lib/serve.mjs";
 import {SUITES, BUILDERS} from "./lib/suites.mjs";
@@ -27,7 +28,6 @@ import {PERF_TOLERANCE, ACUITY_TOLERANCE} from "./lib/metrics.mjs";
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
-const WORKTREE = "/tmp/earth-test-baseline";
 
 const HELP = `earth regression suite
 
@@ -67,6 +67,9 @@ function parseArgs(argv) {
         else if (a.startsWith("-")) throw new Error(`unknown option: ${a}`);
         else opts.suites.push(a);
     }
+    if (opts.repeats !== null && (!Number.isSafeInteger(opts.repeats) || opts.repeats < 1)) {
+        throw new Error("--repeats must be a positive integer");
+    }
     return opts;
 }
 
@@ -99,7 +102,7 @@ async function main() {
     if (opts.help) { console.log(HELP); return 0; }
 
     const plan = collect(opts);
-    if (!plan.length) { console.log("no suites selected"); return 0; }
+    if (!plan.length) { console.log("no suites selected"); return opts.list ? 0 : 1; }
 
     const items = plan.reduce((n, s) => n + s.items, 0);
 
@@ -116,23 +119,25 @@ async function main() {
     }
 
     const ref = opts.ref || await newestReleaseTag();
-    const baselineRoot = await prepareWorktree(ref);
-    const servers = {
-        baseline: await serve(join(baselineRoot, "public")),
-        head: await serve(join(REPO, "public"))
-    };
-    const browser = await launch();
-
-    if (!opts.quiet) {
-        console.log(`baseline: ${ref}   browser: ${browser.version}`);
-        console.log(`collected ${plan.length} suite(s), ${items} item(s)\n`);
-    }
-
-    const probes = await loadProbes(plan);
+    const baseline = await prepareWorktree(ref);
+    const servers = {};
+    let browser;
     const results = [];
-    const started = Date.now();
+    let started;
 
+    // Register each resource before acquiring the next so startup failures clean up too.
     try {
+        servers.baseline = await serve(join(baseline.root, "public"));
+        servers.head = await serve(join(REPO, "public"));
+        browser = await launch();
+
+        if (!opts.quiet) {
+            console.log(`baseline: ${ref}   browser: ${browser.version}`);
+            console.log(`collected ${plan.length} suite(s), ${items} item(s)\n`);
+        }
+
+        const probes = await loadProbes(plan);
+        started = Date.now();
         for (const suite of plan) {
             const collected = await runSuite(suite, probes, browser, servers, opts);
             const built = BUILDERS[suite.spec.kind](collected);
@@ -142,9 +147,12 @@ async function main() {
         }
     }
     finally {
-        await browser.close();
-        await servers.baseline.close();
-        await servers.head.close();
+        const closed = await Promise.allSettled([
+            browser?.close(), servers.baseline?.close(), servers.head?.close()
+        ]);
+        await baseline.close();
+        const errors = closed.filter(result => result.status === "rejected");
+        if (errors.length) throw new AggregateError(errors.map(result => result.reason), "cleanup failed");
     }
 
     if (opts.json) {
@@ -218,14 +226,28 @@ async function newestReleaseTag() {
  * the same files on disk — which is what makes the pixel comparison meaningful.
  */
 async function prepareWorktree(ref) {
-    await run("git", ["worktree", "remove", "--force", WORKTREE], {cwd: REPO}).catch(() => {});
-    await fs.rm(WORKTREE, {recursive: true, force: true});
-    await run("git", ["worktree", "add", "--detach", WORKTREE, ref], {cwd: REPO});
+    // Resolve before creating anything; each invocation owns a private parent directory.
+    const {stdout} = await run("git", ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], {cwd: REPO});
+    const directory = await fs.mkdtemp(join(tmpdir(), "earth-baseline-"));
+    const root = join(directory, "checkout");
+    let added = false;
+    const close = async () => {
+        if (added) await run("git", ["worktree", "remove", "--force", root], {cwd: REPO});
+        added = false;
+        await fs.rm(directory, {recursive: true, force: true});
+    };
 
-    const data = join(WORKTREE, "public", "data");
-    await fs.rm(data, {recursive: true, force: true});
-    await fs.symlink(join(REPO, "public", "data"), data);
-    return WORKTREE;
+    try {
+        await run("git", ["worktree", "add", "--detach", root, stdout.trim()], {cwd: REPO});
+        added = true;
+        const data = join(root, "public", "data");
+        await fs.rm(data, {recursive: true, force: true});
+        await fs.symlink(join(REPO, "public", "data"), data);
+        return {root, close};
+    } catch (error) {
+        await close();
+        throw error;
+    }
 }
 
 async function loadProbes(plan) {
@@ -245,7 +267,8 @@ async function runSuite({name, spec, views, repeats}, probes, browser, servers, 
 
     for (const view of views) {
         const device = view.device || spec.device;
-        const row = {view: view.name, device: device.name, baseline: [], head: []};
+        const row = {view: view.name, device: device.name, input: view.input || "touch",
+            repeats, baseline: [], head: []};
 
         for (let pass = 0; pass < repeats; pass++) {
             // Baseline and head are interleaved rather than run in two blocks, so a machine

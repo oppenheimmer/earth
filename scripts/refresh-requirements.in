@@ -1,0 +1,4 @@
+# Direct dependencies for the Python 3.12 Linux refresh job.
+pygrib==2.1.8
+numpy==2.5.2
+copernicusmarine==2.4.1

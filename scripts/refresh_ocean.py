@@ -56,13 +56,13 @@ first, so the newest day <= the requested day is used; it raises after 8
 misses rather than silently serving old data.
 """
 
-import json
 import math
 import os
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from datasets import write
 
 import numpy as np
 
@@ -488,7 +488,7 @@ def record(values, lat, lon, when, depth, param):
     dy = (float(lat[-1]) - float(lat[0])) / (ny - 1)
 
     flat = [
-        None if math.isnan(v)
+        None if not math.isfinite(v)
         else round(float(v), 3)
         for v in values.flatten()
     ]
@@ -585,8 +585,7 @@ def refresh_product(name, product, day, product_number, product_count):
 
     write_start = time.monotonic()
 
-    with open(out_path, "w") as f:
-        json.dump(out, f, separators=(",", ":"))
+    write(out_path, out)
 
     write_elapsed = time.monotonic() - write_start
     product_elapsed = time.monotonic() - product_start

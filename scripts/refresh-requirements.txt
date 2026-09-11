@@ -1,0 +1,208 @@
+# Python 3.12, Linux x86_64. Regenerate after editing refresh-requirements.in:
+# uv pip compile scripts/refresh-requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --only-binary :all: -o scripts/refresh-requirements.txt
+annotated-types==0.8.0
+    # via pydantic
+arcosparse==0.5.1
+    # via copernicusmarine
+boto3==1.43.92
+    # via copernicusmarine
+botocore==1.43.92
+    # via
+    #   boto3
+    #   s3transfer
+certifi==2026.7.22
+    # via
+    #   pyproj
+    #   requests
+charset-normalizer==3.5.1
+    # via requests
+click==8.5.0
+    # via
+    #   copernicusmarine
+    #   dask
+cloudpickle==3.1.2
+    # via dask
+copernicusmarine==2.4.1
+    # via -r scripts/refresh-requirements.in
+dask==2026.8.0
+    # via copernicusmarine
+donfig==0.8.1.post1
+    # via zarr
+fsspec==2026.7.0
+    # via dask
+google-crc32c==1.8.0
+    # via zarr
+h5netcdf==1.8.1
+    # via copernicusmarine
+h5py==3.16.0
+    # via h5netcdf
+idna==3.19
+    # via requests
+jmespath==1.1.0
+    # via
+    #   boto3
+    #   botocore
+locket==1.0.0
+    # via partd
+numcodecs==0.16.5
+    # via zarr
+numpy==2.5.2
+    # via
+    #   -r scripts/refresh-requirements.in
+    #   copernicusmarine
+    #   h5netcdf
+    #   h5py
+    #   numcodecs
+    #   pandas
+    #   pygrib
+    #   xarray
+    #   zarr
+packaging==26.3
+    # via
+    #   dask
+    #   h5netcdf
+    #   pygrib
+    #   xarray
+    #   zarr
+pandas==3.0.5
+    # via
+    #   arcosparse
+    #   xarray
+partd==1.4.2
+    # via dask
+pyarrow==25.0.1
+    # via arcosparse
+pydantic==2.13.5
+    # via copernicusmarine
+pydantic-core==2.46.5
+    # via pydantic
+pygrib==2.1.8
+    # via -r scripts/refresh-requirements.in
+pyproj==3.8.0
+    # via pygrib
+pystac==1.15.2
+    # via
+    #   arcosparse
+    #   copernicusmarine
+pystac-core==1.15.2
+    # via
+    #   pystac
+    #   pystac-ext-classification
+    #   pystac-ext-datacube
+    #   pystac-ext-eo
+    #   pystac-ext-file
+    #   pystac-ext-grid
+    #   pystac-ext-item-assets
+    #   pystac-ext-label
+    #   pystac-ext-mgrs
+    #   pystac-ext-mlm
+    #   pystac-ext-pointcloud
+    #   pystac-ext-projection
+    #   pystac-ext-raster
+    #   pystac-ext-render
+    #   pystac-ext-sar
+    #   pystac-ext-sat
+    #   pystac-ext-scientific
+    #   pystac-ext-storage
+    #   pystac-ext-table
+    #   pystac-ext-timestamps
+    #   pystac-ext-version
+    #   pystac-ext-view
+    #   pystac-ext-xarray-assets
+pystac-ext-classification==2.0.1
+    # via
+    #   pystac
+    #   pystac-ext-mlm
+pystac-ext-datacube==2.2.1
+    # via pystac
+pystac-ext-eo==1.1.1
+    # via pystac
+pystac-ext-file==2.1.1
+    # via pystac
+pystac-ext-grid==1.1.1
+    # via pystac
+pystac-ext-item-assets==1.0.1
+    # via pystac
+pystac-ext-label==1.0.2
+    # via pystac
+pystac-ext-mgrs==1.0.1
+    # via pystac
+pystac-ext-mlm==1.4.1
+    # via pystac
+pystac-ext-pointcloud==1.0.1
+    # via pystac
+pystac-ext-projection==2.0.1
+    # via
+    #   pystac
+    #   pystac-ext-eo
+pystac-ext-raster==1.1.1
+    # via
+    #   pystac
+    #   pystac-ext-classification
+    #   pystac-ext-mlm
+pystac-ext-render==2.0.0
+    # via pystac
+pystac-ext-sar==1.0.1
+    # via pystac
+pystac-ext-sat==1.0.1
+    # via pystac
+pystac-ext-scientific==1.0.1
+    # via pystac
+pystac-ext-storage==2.0.1
+    # via pystac
+pystac-ext-table==1.2.1
+    # via pystac
+pystac-ext-timestamps==1.1.1
+    # via pystac
+pystac-ext-version==1.2.1
+    # via pystac
+pystac-ext-view==1.0.1
+    # via
+    #   pystac
+    #   pystac-ext-eo
+pystac-ext-xarray-assets==1.0.1
+    # via pystac
+python-dateutil==2.9.0.post0
+    # via
+    #   botocore
+    #   pandas
+    #   pystac-core
+pyyaml==6.0.3
+    # via
+    #   dask
+    #   donfig
+requests==2.34.2
+    # via
+    #   arcosparse
+    #   copernicusmarine
+s3transfer==0.19.2
+    # via boto3
+semver==3.0.4
+    # via copernicusmarine
+six==1.17.0
+    # via python-dateutil
+toolz==1.1.0
+    # via
+    #   dask
+    #   partd
+tqdm==4.70.0
+    # via
+    #   arcosparse
+    #   copernicusmarine
+typing-extensions==4.16.0
+    # via
+    #   numcodecs
+    #   pydantic
+    #   pydantic-core
+    #   typing-inspection
+    #   zarr
+typing-inspection==0.4.4
+    # via pydantic
+urllib3==2.7.0
+    # via
+    #   botocore
+    #   requests
+xarray==2026.7.0
+    # via copernicusmarine
+zarr==3.3.0
+    # via copernicusmarine

@@ -23,16 +23,17 @@ Usage:
     ./gribenv/bin/python scripts/refresh_waves.py                # newest cycle
     ./gribenv/bin/python scripts/refresh_waves.py file.grib2     # convert local GRIB2
 """
-import json
 import math
 import os
 import sys
 import tempfile
 import urllib.request
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pygrib
+from datasets import write as write_dataset
 
 BASE = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfswave.pl"
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "data")
@@ -110,7 +111,7 @@ def record(values, ref, param, unit_decimals=2):
     nj, ni = values.shape
     dx = 360.0 / ni
     dy = 180.0 / (nj - 1)
-    flat = [None if math.isnan(v) else round(float(v), unit_decimals)
+    flat = [None if not math.isfinite(v) else round(float(v), unit_decimals)
             for v in values.flatten()]
     header = {
         "discipline": 10, "disciplineName": "Oceanographic products",
@@ -128,19 +129,24 @@ def record(values, ref, param, unit_decimals=2):
 
 def write(path, records):
     out_path = os.path.abspath(os.path.join(DATA_DIR, path))
-    with open(out_path, "w") as f:
-        json.dump(records, f, separators=(",", ":"))
+    write_dataset(out_path, records)
     h = records[0]["header"]
     print("wrote %s (%d KB) — %s, %dx%d grid" % (
         out_path, os.path.getsize(out_path) // 1024, h["refTime"], h["nx"], h["ny"]))
 
 
 def main():
+    # Own the download through conversion; clean it up on success or failure.
+    with tempfile.TemporaryDirectory(prefix="earth-gfswave-") as directory:
+        refresh(directory)
+
+
+def refresh(directory):
     grib_path = sys.argv[1] if len(sys.argv) > 1 else None
     if grib_path:
         print("using local GRIB file: " + grib_path)
     else:
-        grib_path = os.path.join(tempfile.gettempdir(), "gfswave_0p25_f000.grib2")
+        grib_path = os.path.join(directory, "gfswave.grib2")
         print("searching NOMADS for the newest published GFS-Wave cycle…")
         for ymd, hh in candidate_cycles():
             if fetch_cycle(ymd, hh, grib_path):
@@ -148,11 +154,11 @@ def main():
         else:
             sys.exit("no GFS-Wave cycle available — NOMADS unreachable or lagging")
 
-    grbs = pygrib.open(grib_path)
-    height, grb = field(grbs, "swh")
-    period, _ = field(grbs, "perpw")
-    direction, _ = field(grbs, "dirpw")
-    ref = datetime(grb.year, grb.month, grb.day, grb.hour, tzinfo=timezone.utc)
+    with closing(pygrib.open(grib_path)) as grbs:
+        height, grb = field(grbs, "swh")
+        period, _ = field(grbs, "perpw")
+        direction, _ = field(grbs, "dirpw")
+        ref = datetime(grb.year, grb.month, grb.day, grb.hour, tzinfo=timezone.utc)
 
     # Propagation vector with |v| = period: DIRPW is "direction from" (checked against
     # the Southern Ocean westerlies: median 265° = from the west, marching east).

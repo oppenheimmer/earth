@@ -5,12 +5,14 @@
 # or run this script directly.
 
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 PORT=8420
-URL="http://localhost:${PORT}"
+HOST=127.0.0.1
+URL="http://${HOST}:${PORT}"
 
 if ! curl -s -m 2 -o /dev/null "$URL"; then
-    nohup python3 -m http.server "$PORT" -d public >/dev/null 2>&1 &
+    # Keep the local preview off network interfaces.
+    nohup python3 -m http.server "$PORT" --bind "$HOST" -d public >/dev/null 2>&1 &
     # Wait for the server to accept connections.
     for _ in $(seq 1 20); do
         curl -s -m 1 -o /dev/null "$URL" && break

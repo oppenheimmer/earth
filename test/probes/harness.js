@@ -240,6 +240,29 @@ var E = (function () {
     // Math.random and never repeats.
     var STABLE_POLLS = 3;
     var POLL_MS = 400;
+    var pendingWorkers = 0;
+    var NativeWorker = window.Worker;
+
+    // A stable coarse coastline is provisional while its detail Worker is running.
+    if (typeof NativeWorker === "function") {
+        window.Worker = function (url, options) {
+            var worker = new NativeWorker(url, options);
+            if (String(url).indexOf("detail-worker.js") < 0) return worker;
+            pendingWorkers++;
+            var complete = false;
+            function finished() {
+                if (complete) return;
+                complete = true;
+                pendingWorkers--;
+            }
+            worker.addEventListener("message", finished, {once: true});
+            worker.addEventListener("error", finished, {once: true});
+            var terminate = worker.terminate;
+            worker.terminate = function () { finished(); return terminate.call(worker); };
+            return worker;
+        };
+        window.Worker.prototype = NativeWorker.prototype;
+    }
 
     function loaded() {
         var date = el("data-date"), label = el("data-label");
@@ -258,7 +281,7 @@ var E = (function () {
             await sleep(POLL_MS);
             var status = el("status").textContent.trim();
             var now = settleHash("map") + ":" + settleHash("overlay") + ":" + settleHash("lines");
-            stable = (now === previous && status === "") ? stable + 1 : 0;
+            stable = (now === previous && status === "" && pendingWorkers === 0) ? stable + 1 : 0;
             previous = now;
             if (stable >= STABLE_POLLS) return true;
         }

@@ -131,6 +131,7 @@
 
     var engine = null;              // the wind.js context, latched in register()
     var day = null;                 // Blue Marble sampler
+    var loadGeneration = 0;         // base textures and crops belong to one layer load
     var night = null;               // Black Marble sampler, or null
     var cache = {};                 // decoded samplers by URL: switching layers must not re-decode
     var sunTime = new Date();       // the instant the current frame is drawn for — one value per
@@ -605,6 +606,7 @@
         if (detail && detail.master === master &&
             covers(detail.win, cap) && !worthRecutting(cap)) return;
         detailBusy = true;
+        var generation = loadGeneration;
         // The three assets fail independently. Only the Blue Marble master is load-bearing —
         // a missing night or elevation twin should cost that layer its own upgrade, not the
         // imagery's, so those two resolve to null instead of rejecting the set.
@@ -616,6 +618,7 @@
             optional(hiNight ? decode(hiNight) : null),
             optional(hiRelief && !terrainHi ? texture(hiRelief, buildRelief) : null)
         ]).then(function (im) {
+            if (generation !== loadGeneration) return;
             var win = cropWindow(visibleCap());
             // Asked again of the window as it stands now: a view that zoomed back out while this
             // was in flight must not have a crop installed over the plate that already beats it.
@@ -638,6 +641,7 @@
             detailBusy = false;
             engine.requestRender();   // covers() is satisfied now, so this settles in one pass
         }).catch(function (err) {
+            if (generation !== loadGeneration) return;
             console.error(err);
             detailBusy = false;
             detailFailed = true;
@@ -1154,6 +1158,7 @@
         tick: SUN_TICK,   // the engine re-renders this often; 0 would mean a static layer
 
         load: function (layer) {
+            var generation = ++loadGeneration;
             // The crop belongs to the layer that was showing, not to the one arriving: a
             // Daylight crop has no night plane and Relief wants a different elevation map.
             detail = null;
@@ -1169,6 +1174,7 @@
                 layer.night ? texture(layer.night) : null,
                 layer.relief ? texture(layer.relief, buildRelief) : null
             ]).then(function (t) {
+                if (generation !== loadGeneration) return;
                 day = baseDay = t[0];
                 night = baseNight = t[1];
                 terrain = t[2];
@@ -1218,7 +1224,11 @@
         return new Promise(function (resolve, reject) {
             var img = new Image();
             img.crossOrigin = "anonymous";
-            img.onload = function () { resolve(cache[url] = (build || buildTexture)(img)); };
+            img.onload = function () {
+                // DOM callback exceptions must reject the load, not leave it pending.
+                try { resolve(cache[url] = (build || buildTexture)(img)); }
+                catch (err) { reject(err); }
+            };
             img.onerror = function () { reject(new Error("texture: " + url.split("/").pop())); };
             img.src = url;
         });

@@ -387,14 +387,54 @@ function compareSunPhysics(rows) {
     });
 }
 
-function comparePerf(rows) {
-    const a = rows[0].baseline.filter((r) => !r.error);
-    const b = rows[0].head.filter((r) => !r.error);
-    if (!a.length || !b.length) {
-        return [{metric: "suite", verdict: "ERROR", note: "no successful run on one of the builds"}];
-    }
+// Required measurements come from the probe contract, never from a possibly empty run.
+const PERF_FIELDS = {
+    "1s": ["events", "repaints", "repaintsPerEvent", "repaintsPerFrame", "repaintsPerSecond",
+        "framesObserved", "fps", "medianFrameGapMs", "worstFrameGapMs", "elapsedMs"],
+    burst: ["events", "repaints", "blockingMs"],
+    latency: ["samples", "medianMs", "worstMs", "completeSamples", "completeMedianMs", "completeWorstMs"]
+};
 
-    const cases = Object.keys(a[0]).filter((k) => typeof a[0][k] === "object" && a[0][k] && !Array.isArray(a[0][k]));
+function comparePerf(rows) {
+    if (!rows.length) return [{metric: "suite", verdict: "ERROR", change: "no views measured"}];
+    return rows.flatMap(comparePerfView);
+}
+
+function comparePerfView(row) {
+    const cases = row.input === "mouse"
+        ? ["drag-1s", "wheel-1s", "drag-burst", "wheel-burst", "drag-latency", "wheel-latency"]
+        : ["rotate-1s", "pinch-1s", "rotate-burst", "pinch-burst", "rotate-latency"];
+    const expected = row.repeats ?? PERF_REPEATS;
+    const errors = [];
+    function error(metric, change) {
+        errors.push({metric: `${row.view}: ${metric}`, verdict: "ERROR", change});
+    }
+    for (const build of ["baseline", "head"]) {
+        const runs = row[build];
+        if (!Array.isArray(runs) || runs.length !== expected || expected < 1) {
+            error(build, `expected ${expected} repeats, received ${runs?.length ?? 0}`);
+            continue;
+        }
+        runs.forEach((run, index) => {
+            const label = `${build} repeat ${index + 1}`;
+            if (!run || run.error) { error(label, run?.error || "missing run"); return; }
+            for (const name of cases) {
+                const fields = PERF_FIELDS[name.split("-")[1]];
+                for (const field of fields) {
+                    const value = run[name]?.[field];
+                    if (!Number.isFinite(value) || value < 0) {
+                        error(`${label} ${name}.${field}`, "missing or invalid measurement");
+                    }
+                }
+                if (name.endsWith("latency") && (!run[name]?.samples || !run[name]?.completeSamples)) {
+                    error(`${label} ${name}`, "no completed latency samples");
+                }
+            }
+        });
+    }
+    if (errors.length) return errors;
+
+    const a = row.baseline, b = row.head;
     const out = [];
 
     for (const name of cases) {
@@ -403,17 +443,6 @@ function comparePerf(rows) {
             const before = medianOf(a.map((r) => r[name][metric]));
             const after = medianOf(b.map((r) => r[name][metric]));
             out.push({metric: `${name}.${metric}`, before, after, ...judge(metric, before, after)});
-        }
-        // A latency case that never saw a repaint has no latency to report; its zeros are
-        // absence of data, not speed. Say so rather than letting them average in.
-        if ("samples" in a[0][name]) {
-            const beforeN = medianOf(a.map((r) => r[name].samples));
-            const afterN = medianOf(b.map((r) => r[name].samples));
-            if (!beforeN || !afterN) {
-                out.push({metric: `${name}.samples`, before: beforeN, after: afterN,
-                    verdict: !afterN ? "WORSE" : "BASELINE IDLE",
-                    change: !afterN ? "no repaint observed on head" : "no repaint observed on baseline"});
-            }
         }
         if ("repaintsPerFrame" in a[0][name]) {
             const before = medianOf(a.map((r) => r[name].repaintsPerFrame));
@@ -530,7 +559,10 @@ export const BUILDERS = {
     speed(data) {
         const rows = comparePerf(data);
         const worse = rows.filter((r) => r.verdict === "WORSE");
+        const errors = rows.filter((r) => r.verdict === "ERROR");
         const better = rows.filter((r) => r.verdict === "BETTER");
+        const summary = `${better.length} better, ${worse.length} worse, ${errors.length} errors, ` +
+            `${rows.length - better.length - worse.length - errors.length} unchanged`;
         const body = [table(["metric", "baseline", "head", "change", "verdict"],
             rows.map((r) => [r.metric, fmt(r.before), fmt(r.after), r.change || "—", r.verdict]))];
 
@@ -539,10 +571,10 @@ export const BUILDERS = {
             for (const r of worse) body.push(`- **${r.metric}**: ${fmt(r.before)} -> ${fmt(r.after)} (${r.change})`);
         }
         return {
-            status: `${better.length} better, ${worse.length} worse, ${rows.length - better.length - worse.length} unchanged`,
-            bad: worse.length,
+            status: summary,
+            bad: worse.length + errors.length,
             body,
-            summary: `${better.length} better, ${worse.length} worse, ${rows.length - better.length - worse.length} unchanged`
+            summary
         };
     }
 };

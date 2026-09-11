@@ -31,7 +31,7 @@
         var WIND = "current-wind-surface-level-gfs-0.25.json";
         var CUR = "current-ocean-currents-cmems-0.25.json";
         // layer id → [flow file, scalar file?], mirroring LAYERS in wind.js.
-        var FILES = {
+        var FILES = Object.assign(Object.create(null), {
             "surface":     [WIND],
             "1000hpa":     ["current-wind-1000hpa-gfs-0.25.json"],
             "500hpa":      ["current-wind-500hpa-gfs-0.25.json"],
@@ -46,17 +46,17 @@
             "sst":         [CUR, "current-ocean-temp-cmems-0.25.json"],
             "waves":       ["current-ocean-waves-gfswave-0.25.json",
                             "current-ocean-wave-height-gfswave-0.25.json"]
-        };
+        });
         // The RealView layers load images, not JSON. All three share one Blue Marble month
         // (sunlight.js picks it the same way); warming the image cache is enough, because
         // its texture() creates an <img> with the same crossOrigin and hits the same entry.
         var mm = (new Date().getUTCMonth() + 101).toString().slice(1);
         var DAY = "bluemarble-2004" + mm + ".webp";
-        var IMAGES = {
+        var IMAGES = Object.assign(Object.create(null), {
             "daylight":    [DAY],
             "nightlights": [DAY, "blackmarble-2016-5400.jpg"],
             "relief":      [DAY, "elevation-gebco-1350.png"]
-        };
+        });
 
         var id = hash.get("layer");
         var pending = {};

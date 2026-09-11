@@ -134,6 +134,40 @@
         return a - n * Math.floor(a / n);
     }
 
+    var MAX_GRID_COLUMNS = 2880;
+    var MAX_GRID_ROWS = 1441;
+    var MAX_GRID_CELLS = 2000000;  // bounds decoded memory, including custom data sources
+    var GEOMETRY_EPSILON = 1e-6;
+
+    function validateGrid(records, count) {
+        if (!Array.isArray(records) || records.length !== count) throw new Error("invalid grid records");
+        // Validate before allocating rows: JSON numbers can overflow to Infinity.
+        records.forEach(function (record) {
+            var h = record && record.header, data = record && record.data;
+            if (!h || !Array.isArray(data)) throw new Error("missing grid header or data");
+            if (!Number.isInteger(h.nx) || !Number.isInteger(h.ny) || h.nx < 2 || h.ny < 2 ||
+                h.nx > MAX_GRID_COLUMNS || h.ny > MAX_GRID_ROWS || h.nx * h.ny > MAX_GRID_CELLS ||
+                data.length !== h.nx * h.ny) throw new Error("invalid grid dimensions or sample count");
+            if (![h.dx, h.dy, h.lo1, h.la1].every(Number.isFinite) || h.dx <= 0 || h.dy <= 0 ||
+                h.lo1 < -180 || h.lo1 > 360 || h.la1 < -90 || h.la1 > 90 ||
+                (h.nx - 1) * h.dx > 360 + GEOMETRY_EPSILON ||
+                h.la1 - (h.ny - 1) * h.dy < -90 - GEOMETRY_EPSILON ||
+                (h.scanMode !== undefined && h.scanMode !== 0)) throw new Error("unsupported grid geometry");
+            var forecast = h.forecastTime === undefined ? 0 : h.forecastTime;
+            var timestamp = Date.parse(h.refTime);
+            if (!Number.isFinite(timestamp) || !Number.isFinite(forecast) || forecast < 0 ||
+                !Number.isFinite(new Date(timestamp + forecast * 3600000).getTime())) {
+                throw new Error("invalid grid time");
+            }
+            for (var i = 0; i < data.length; i++) {
+                var value = data[i];
+                if (value !== null && (!Number.isFinite(value) || !Number.isFinite(Math.fround(value)))) {
+                    throw new Error("grid samples must be finite Float32 numbers or null");
+                }
+            }
+        });
+    }
+
     /**
      * Builds an interpolating grid from grib2json output: two records (u then v wind components)
      * on a regular lat/lon grid, scan mode 0 (west→east, north→south). Rows are flat
@@ -141,6 +175,7 @@
      * arrays would cost hundreds of MB.
      */
     function buildGrid(records) {
+        validateGrid(records, 2);
         var uRecord = null, vRecord = null;
         records.forEach(function (record) {
             var h = record.header;
@@ -150,6 +185,9 @@
         if (!uRecord || !vRecord) throw new Error("wind data must contain u and v components");
 
         var header = uRecord.header;
+        ["nx", "ny", "dx", "dy", "lo1", "la1", "refTime", "forecastTime"].forEach(function (key) {
+            if (header[key] !== vRecord.header[key]) throw new Error("vector grids disagree: " + key);
+        });
         var uData = uRecord.data, vData = vRecord.data;
         var λ0 = header.lo1, φ0 = header.la1;  // origin (e.g., 0.0E, 90.0N)
         var Δλ = header.dx, Δφ = header.dy;    // distance between grid points
@@ -170,8 +208,10 @@
         for (var j = 0; j < nj; j++) {
             var row = new Float32Array(rowLength * 2);
             for (var i = 0; i < ni; i++, p++) {
-                row[2 * i] = isValue(uData[p]) ? uData[p] : NaN;
-                row[2 * i + 1] = isValue(vData[p]) ? vData[p] : NaN;
+                // A corner contributes only when both vector components exist.
+                var valid = isValue(uData[p]) && isValue(vData[p]);
+                row[2 * i] = valid ? uData[p] : NaN;
+                row[2 * i + 1] = valid ? vData[p] : NaN;
             }
             if (isContinuous) {
                 row[2 * ni] = row[0];  // duplicate first column as last to simplify wrap-around
@@ -218,6 +258,7 @@
      * same regular lat/lon layout as buildGrid, one value per cell.
      */
     function buildScalarGrid(records) {
+        validateGrid(records, 1);
         var header = records[0].header;
         var data = records[0].data;
         var λ0 = header.lo1, φ0 = header.la1;
@@ -442,8 +483,9 @@
     function buildDetailMesh(url) {
         if (typeof Worker === "function" && location.protocol !== "file:") {
             try {
+                // Construct outside the executor so policy refusals reach the fallback.
+                var worker = new Worker("js/detail-worker.js");
                 return new Promise(function (resolve, reject) {
-                    var worker = new Worker("js/detail-worker.js");
                     worker.onmessage = function (e) {
                         worker.terminate();     // one-shot: the meshes are built once per page
                         if (e.data.error) reject(new Error(e.data.error));
@@ -1093,7 +1135,7 @@
     // give each dash a soft ease-in/out with no trailing smear at that near-static speed.
     var WAVE_PARTICLES = {velocityScale: 1 / 360000, maxIntensity: 22, multiplier: 3,
         lineWidth: 2.5, maxAge: 20, fade: 0.72, crestLength: 4.5, brightnessFloor: 40};
-    var LAYERS = {
+    var LAYERS = Object.assign(Object.create(null), {
         "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
         "1000hpa": {file: DATA_ROOT + "current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
         "500hpa": {file: DATA_ROOT + "current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"},
@@ -1189,7 +1231,7 @@
                 scaleLabel: "0 &ndash; 15 m",
                 format: function (v) { return v.toFixed(1) + " m"; }
             }}
-    };
+    });
 
     // ------------------------------------------------------------------------------------------------
     // Renderer plug-ins
@@ -1347,6 +1389,7 @@
     var currentLayerId = null;  // active layer id — the hash write-back's source of truth
     var activeRenderer = null;  // renderer plug-in owning the overlay, or null for the data layers
     var rendererTimer = null;   // its periodic re-render, if it asked for one
+    var loadGeneration = 0;     // only the latest selection may install async results
 
     function cancelWork() {
         currentCancel.requested = true;
@@ -1374,16 +1417,34 @@
     // verbatim — DATA_ROOT resolved from it at load, so dropping it would silently
     // send a reload back to the R2 bucket.
     var hashDataOverride = new URLSearchParams(location.hash.slice(1)).get("data");
+
+    function setCredit(layer) {
+        var label = document.getElementById("data-label");
+        if (!hashDataOverride) {
+            label.innerHTML = layer.credit || DEFAULT_CREDIT;
+            return;
+        }
+        // Custom bytes must identify their source instead of inheriting official credit.
+        var source;
+        try {
+            var url = new URL(DATA_ROOT, location.href);
+            source = url.host || url.protocol;
+        } catch (err) {
+            source = "invalid URL";
+        }
+        label.textContent = "Custom source: " + source;
+    }
+
     function writeHash() {
         if (!currentLayerId) return;
         var r = projection.rotate();
-        var parts = [
-            "layer=" + currentLayerId,
-            "rotate=" + r[0].toFixed(1) + "," + r[1].toFixed(1),
-            "zoom=" + (projection.scale() / initialScale).toFixed(2)
-        ];
-        if (hashDataOverride) parts.push("data=" + hashDataOverride);
-        history.replaceState(null, "", "#" + parts.join("&"));
+        var parts = new URLSearchParams({
+            layer: currentLayerId,
+            rotate: r[0].toFixed(1) + "," + r[1].toFixed(1),
+            zoom: (projection.scale() / initialScale).toFixed(2)
+        });
+        if (hashDataOverride) parts.set("data", hashDataOverride);
+        history.replaceState(null, "", "#" + parts.toString());
     }
 
     /** Zoom is clamped to 0.5x-MAX_ZOOM of the fitted scale, wheel and pinch alike. */
@@ -1470,17 +1531,17 @@
         }
         return fetchJson(url).then(function (records) {
             var built = build(records);
-            done();
             delete pendingJson[url];       // the JSON has served its purpose; let it go
             gridCache.set(url, built);
             while (gridCache.size > MAX_CACHED_GRIDS) {
                 gridCache.delete(gridCache.keys().next().value);
             }
             return built;
-        }, function (err) {
-            done();
-            throw new Error(what + ": " + err.message);   // only the load's own failures
-        });
+        }).catch(function (err) {
+            // A rejected schema must be retryable just like a failed download.
+            delete pendingJson[url];
+            throw new Error(what + ": " + err.message);
+        }).finally(done);
     }
 
     /**
@@ -1526,6 +1587,8 @@
      */
     function loadLayer(id) {
         var layer = LAYERS[id];
+        if (!layer && !deferredFor(id)) return;
+        var generation = ++loadGeneration;
         if (!layer) {
             // Not registered yet: either it is a deferred renderer's layer and this click is
             // what pays for it, or the id is simply unknown and there is nothing to do.
@@ -1533,8 +1596,10 @@
             if (!spec) return;
             setStatus("loading renderer…");
             loadDeferred(spec).then(function () {
+                if (generation !== loadGeneration) return;
                 loadLayer(id);
             }).catch(function (err) {
+                if (generation !== loadGeneration) return;
                 console.error(err);
                 setStatus("error: " + err.message);
             });
@@ -1576,17 +1641,20 @@
         setLocation(layer.placeholder || DEFAULT_PLACEHOLDER);
         writeHash();
         setStatus("downloading data…");
+        if (hashDataOverride) setCredit(layer);
 
         // A renderer layer has no grids: it loads whatever it draws from, then owns the frame.
         if (activeRenderer) {
             grid = scalarGrid = overlaySpec = null;
             landFill = false;
             activeRenderer.load(layer).then(function () {
+                if (generation !== loadGeneration) return;
                 drawScaleBar();
-                document.getElementById("data-label").innerHTML = layer.credit || DEFAULT_CREDIT;
+                setCredit(layer);
                 recompute();
                 if (activeRenderer.tick) rendererTimer = setInterval(recompute, activeRenderer.tick);
             }).catch(function (err) {
+                if (generation !== loadGeneration) return;
                 console.error(err);
                 setStatus("error: " + err.message);
             });
@@ -1598,6 +1666,7 @@
             loads.push(loadGrid(layer.scalar.file, buildScalarGrid, "overlay data"));
         }
         Promise.all(loads).then(function (results) {
+            if (generation !== loadGeneration) return;
             grid = results[0];
             overlaySpec = layer.scalar || null;
             scalarGrid = results.length > 1 ? results[1] : null;
@@ -1605,11 +1674,12 @@
             landFill = !!layer.landFill;
             flowFormat = layer.flowFormat || KMH;
             drawScaleBar();
-            document.getElementById("data-label").innerHTML = layer.credit || DEFAULT_CREDIT;
+            setCredit(layer);
             document.getElementById("data-date").textContent =
-                (layer.dateLabel || "Data: GFS analysis, ") + formatDate(grid.date);
+                (hashDataOverride ? "Dataset time: " : (layer.dateLabel || "Data: GFS analysis, ")) + formatDate(grid.date);
             recompute();
         }).catch(function (err) {
+            if (generation !== loadGeneration) return;
             console.error(err);
             setStatus("error: " + err.message);
         });

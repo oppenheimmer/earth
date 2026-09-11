@@ -17,7 +17,16 @@ export async function serve(root) {
     const server = createServer(async (req, res) => {
         // Strip the query and hash, then confine the path to the root: a request is a
         // filename here, never a traversal.
-        const rel = normalize(decodeURIComponent(req.url.split(/[?#]/)[0])).replace(/^(\.\.[/\\])+/, "");
+        let decoded;
+        try {
+            decoded = decodeURIComponent(req.url.split(/[?#]/)[0]);
+            if (decoded.includes("\0")) throw new URIError("null byte");
+        } catch {
+            res.writeHead(400, {"content-type": "text/plain"});
+            res.end("bad request");
+            return;
+        }
+        const rel = normalize(decoded).replace(/^(\.\.[/\\])+/, "");
         const path = join(root, rel === "/" ? "index.html" : rel);
 
         try {
@@ -29,7 +38,7 @@ export async function serve(root) {
                 "content-length": stat.size,
                 "cache-control": "no-store"
             });
-            createReadStream(path).pipe(res);
+            createReadStream(path).on("error", () => res.destroy()).pipe(res);
         }
         catch {
             res.writeHead(404, {"content-type": "text/plain"});
@@ -37,7 +46,7 @@ export async function serve(root) {
         }
     });
 
-    await new Promise((done) => server.listen(0, "127.0.0.1", done));
+    await new Promise((done, reject) => server.once("error", reject).listen(0, "127.0.0.1", done));
 
     return {
         port: server.address().port,

@@ -42,7 +42,7 @@ const DRAW_COUNTERS = new Set([
 export const TRACKING_FLOOR = 0.5;
 
 export function medianOf(values) {
-    const sorted = values.filter((v) => typeof v === "number").sort((x, y) => x - y);
+    const sorted = values.filter(Number.isFinite).sort((x, y) => x - y);
     return sorted.length ? sorted[sorted.length >> 1] : null;
 }
 
@@ -54,8 +54,8 @@ export function percentChange(before, after) {
 
 export function judge(metric, before, after) {
     const better = PERF_METRICS[metric];
+    if (!Number.isFinite(before) || !Number.isFinite(after)) return {verdict: "ERROR", change: "missing"};
     if (before === after) return {verdict: "SAME", change: "0%"};
-    if (before === null || after === null) return {verdict: "ERROR", change: "missing"};
 
     if (DRAW_COUNTERS.has(metric) && before === 0 && after > 0) {
         return {verdict: "BASELINE IDLE", change: `0 -> ${after}`};
@@ -76,8 +76,8 @@ export function judge(metric, before, after) {
  * repaintsPerFrame has a good *value*, not a good direction — see TRACKING_FLOOR.
  */
 export function judgeTracking(before, after) {
+    if (!Number.isFinite(before) || !Number.isFinite(after)) return {verdict: "ERROR", change: "missing"};
     if (before === after) return {verdict: "SAME", change: "0%"};
-    if (after === null) return {verdict: "WORSE", change: "no frames served"};
     const change = percentChange(before, after);
     if (after < TRACKING_FLOOR && before >= TRACKING_FLOOR) {
         return {verdict: "WORSE", change: `${change} — stopped tracking`};
@@ -97,6 +97,7 @@ export function judgeTracking(before, after) {
 export const ACUITY_TOLERANCE = 0.02;
 
 export function judgeAcuity(before, after) {
+    if (!Number.isFinite(before) || !Number.isFinite(after)) return {verdict: "ERROR", change: "missing"};
     if (before === after) return {verdict: "SAME", change: "0%"};
     if (!before || after === null || after === undefined) return {verdict: "ERROR", change: "missing"};
     const change = percentChange(before, after);

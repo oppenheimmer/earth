@@ -36,7 +36,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q libeccodes-dev   # GRIB decoder backend
-          pip install pygrib numpy copernicusmarine
+          python -m pip install --only-binary=:all: -r scripts/refresh-requirements.txt
       - name: Refresh GFS atmosphere (anonymous)
         run: |
           for p in surface 1000hpa 500hpa 10hpa temperature rh dew; do

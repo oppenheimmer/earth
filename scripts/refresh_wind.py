@@ -21,15 +21,17 @@ Notes:
   - A new cycle's files appear on NOMADS ~3.5-5 h after the cycle time, so the script
     walks backwards through recent cycles until one responds with actual GRIB data.
 """
-import json
 import math
 import os
 import sys
 import tempfile
 import urllib.request
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 import pygrib
+import numpy as np
+from datasets import write
 
 BASE = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "data")
@@ -113,14 +115,14 @@ def fetch_cycle(ymd, hh, dest, lev_param, var_params):
 
 def record(grb, param, surface):
     lats, _ = grb.latlons()
-    values = grb.values
+    values = np.ma.filled(grb.values.astype(float), np.nan)
     if lats[0, 0] < lats[-1, 0]:  # ensure scan mode 0: north -> south
         values = values[::-1]
     nj, ni = values.shape
     dx = 360.0 / ni
     dy = 180.0 / (nj - 1)
     ref = datetime(grb.year, grb.month, grb.day, grb.hour, tzinfo=timezone.utc)
-    flat = [None if (isinstance(v, float) and math.isnan(v)) else round(float(v), 1)
+    flat = [None if not math.isfinite(v) else round(float(v), 1)
             for v in values.flatten()]
     header = {
         "discipline": 0, "disciplineName": "Meteorological products",
@@ -141,6 +143,12 @@ SURFACE_2M = {"surface1Type": 103, "surface1TypeName": "Specified height level a
 
 
 def main():
+    # Own the download through conversion; clean it up on success or failure.
+    with tempfile.TemporaryDirectory(prefix="earth-gfs-") as directory:
+        refresh(directory)
+
+
+def refresh(directory):
     args = sys.argv[1:]
     name = args.pop(0) if args and args[0] in (LEVELS.keys() | SCALARS.keys()) else "surface"
     product = LEVELS.get(name) or SCALARS[name]
@@ -149,7 +157,7 @@ def main():
     if grib_path:
         print("using local GRIB file: " + grib_path)
     else:
-        grib_path = os.path.join(tempfile.gettempdir(), "gfs_0p25_f000_%s.grib2" % name)
+        grib_path = os.path.join(directory, "gfs.grib2")
         print("searching NOMADS for the newest published GFS cycle (%s)…" % name)
         var_params = ["var_UGRD", "var_VGRD"] if is_wind else [product["var"]]
         for ymd, hh in candidate_cycles():
@@ -158,24 +166,23 @@ def main():
         else:
             sys.exit("no GFS cycle available — NOMADS unreachable or lagging")
 
-    grbs = pygrib.open(grib_path)
-    if is_wind:
-        surface = {k: product[k] for k in ("surface1Type", "surface1TypeName", "surface1Value")}
-        u_select = dict(product["select"])
-        v_select = dict(u_select, shortName=u_select["shortName"].replace("u", "v"))
-        u = grbs.select(**u_select)[0]
-        v = grbs.select(**v_select)[0]
-        out = [record(u, dict(WIND_PARAM, parameterNumber=2,
-                              parameterNumberName="U-component_of_wind"), surface),
-               record(v, dict(WIND_PARAM, parameterNumber=3,
-                              parameterNumberName="V-component_of_wind"), surface)]
-    else:
-        grb = grbs.select(**product["select"])[0]
-        out = [record(grb, product["param"], SURFACE_2M)]
+    with closing(pygrib.open(grib_path)) as grbs:
+        if is_wind:
+            surface = {k: product[k] for k in ("surface1Type", "surface1TypeName", "surface1Value")}
+            u_select = dict(product["select"])
+            v_select = dict(u_select, shortName=u_select["shortName"].replace("u", "v"))
+            u = grbs.select(**u_select)[0]
+            v = grbs.select(**v_select)[0]
+            out = [record(u, dict(WIND_PARAM, parameterNumber=2,
+                                  parameterNumberName="U-component_of_wind"), surface),
+                   record(v, dict(WIND_PARAM, parameterNumber=3,
+                                  parameterNumberName="V-component_of_wind"), surface)]
+        else:
+            grb = grbs.select(**product["select"])[0]
+            out = [record(grb, product["param"], SURFACE_2M)]
 
     out_path = os.path.abspath(os.path.join(DATA_DIR, product["out"]))
-    with open(out_path, "w") as f:
-        json.dump(out, f, separators=(",", ":"))
+    write(out_path, out)
     h = out[0]["header"]
     print("wrote %s (%d KB) — %s +%dh, %dx%d grid" % (
         out_path, os.path.getsize(out_path) // 1024,

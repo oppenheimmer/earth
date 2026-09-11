@@ -1,7 +1,7 @@
 // Chrome DevTools Protocol driver: everything that knows about sockets, targets and
 // emulation lives here, so a suite only ever says "open this view and give me the result".
 import {spawn} from "node:child_process";
-import {mkdtemp, rm} from "node:fs/promises";
+import {mkdtemp, readFile, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 
@@ -11,41 +11,61 @@ const CHROME_CANDIDATES = [
 
 const READY_TIMEOUT_MS = 20000;
 const PROBE_POLL_MS = 500;
+const STDERR_LIMIT = 4096;
+const SANDBOX = {ENABLED: "enabled", DISABLED: "disabled"};
 
 /** Launches a headless browser and resolves to {newPage, close}. */
 export async function launch() {
-    const profile = await mkdtemp(join(tmpdir(), "earth-test-"));
-    const port = 9500 + Math.floor(Math.random() * 400);
-
-    let child;
-    for (const bin of CHROME_CANDIDATES) {
-        child = spawn(bin, [
-            "--headless=new", "--no-sandbox", "--disable-gpu",
-            "--remote-debugging-port=" + port,
-            "--user-data-dir=" + profile,
-            "about:blank"
-        ], {stdio: "ignore"});
-
-        const failed = await new Promise((done) => {
-            child.once("error", () => done(true));
-            setTimeout(() => done(false), 300);
-        });
-        if (!failed) break;
-        child = null;
+    const sandbox = process.env.EARTH_CHROME_SANDBOX || SANDBOX.ENABLED;
+    if (!Object.values(SANDBOX).includes(sandbox)) {
+        throw new Error("EARTH_CHROME_SANDBOX must be enabled or disabled");
     }
-    if (!child) throw new Error("no chromium/chrome binary found (tried " + CHROME_CANDIDATES.join(", ") + ")");
-
-    const version = await waitFor(() => fetchJson(`http://127.0.0.1:${port}/json/version`));
-    if (!version) throw new Error("browser did not open a debugging port");
-
-    return {
-        version: version.Browser,
-        newPage: (options) => newPage(port, options),
-        close: async () => {
-            child.kill("SIGKILL");
-            await rm(profile, {recursive: true, force: true}).catch(() => {});
+    const profile = await mkdtemp(join(tmpdir(), "earth-test-"));
+    let child;
+    let stderr = "";
+    const close = async () => {
+        // Wait for exit before removing files the browser could still recreate.
+        if (child && child.exitCode === null && child.signalCode === null) {
+            const exited = new Promise(done => child.once("exit", done));
+            if (child.kill("SIGKILL")) await exited;
         }
+        await rm(profile, {recursive: true, force: true});
     };
+
+    try {
+        for (const bin of CHROME_CANDIDATES) {
+            child = spawn(bin, [
+                "--headless=new", "--disable-gpu",
+                ...(sandbox === SANDBOX.DISABLED ? ["--no-sandbox"] : []),
+                "--remote-debugging-port=0",
+                "--user-data-dir=" + profile,
+                "about:blank"
+            ], {stdio: ["ignore", "ignore", "pipe"], env: {...process.env, TMPDIR: profile}});
+            child.stderr.on("data", data => { stderr = (stderr + data).slice(-STDERR_LIMIT); });
+            const started = await new Promise(done => {
+                child.once("spawn", () => done(true));
+                child.once("error", () => done(false));
+            });
+            if (started) break;
+            child = null;
+        }
+        if (!child) throw new Error("no chromium/chrome binary found (tried " + CHROME_CANDIDATES.join(", ") + ")");
+
+        // Read the OS-assigned port from this profile so concurrent launches cannot collide.
+        let port;
+        const version = await waitFor(async () => {
+            const active = await readFile(join(profile, "DevToolsActivePort"), "utf8");
+            port = Number(active.split("\n")[0]);
+            return fetchJson(`http://127.0.0.1:${port}/json/version`);
+        }, child);
+        if (!version) throw new Error("browser did not open a debugging port");
+        return {version: version.Browser, newPage: options => newPage(port, options), close};
+    } catch (error) {
+        await close();
+        const hint = sandbox === SANDBOX.ENABLED
+            ? "; sandbox enabled (EARTH_CHROME_SANDBOX=disabled is an explicit opt-out for unsupported hosts)" : "";
+        throw new Error(error.message + hint + (stderr ? "\n" + stderr : ""), {cause: error});
+    }
 }
 
 async function fetchJson(url, init) {
@@ -53,9 +73,12 @@ async function fetchJson(url, init) {
     return res.json();
 }
 
-async function waitFor(attempt) {
+async function waitFor(attempt, child) {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
+        if (child.exitCode !== null || child.signalCode !== null) {
+            throw new Error("browser exited before opening a debugging port");
+        }
         try { return await attempt(); }
         catch { await sleep(200); }
     }

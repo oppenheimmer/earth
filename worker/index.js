@@ -52,8 +52,119 @@ function withCors(headers) {
     // sunlight.js reads texture pixels back with getImageData, so its <img> is
     // crossOrigin="anonymous" and the response must carry CORS or the canvas is tainted.
     headers.set("Access-Control-Allow-Origin", "*");
-    headers.set("Access-Control-Expose-Headers", "Content-Length, ETag");
+    headers.set("Access-Control-Expose-Headers", "Content-Length, Content-Range, ETag, Last-Modified, Accept-Ranges");
     return headers;
+}
+
+const CONDITIONAL_HEADERS = [
+    "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range"
+];
+const MAX_READ_ATTEMPTS = 2;
+
+function headersFor(object, key) {
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set("ETag", object.httpEtag);
+    headers.set("Last-Modified", object.uploaded.toUTCString());
+    headers.set("Cache-Control", (headers.get("Cache-Control") ||
+        (/^current-/.test(key) ? FALLBACK_CACHE_CONTROL.volatile : FALLBACK_CACHE_CONTROL.immutable)) +
+        (isPixelData(headers.get("Content-Type")) ? ", no-transform" : ""));
+    headers.set("Accept-Ranges", "bytes");
+    return withCors(headers);
+}
+
+function failure(status, request) {
+    const messages = {400: "bad request", 404: "not found", 502: "storage unavailable", 503: "retry request"};
+    return new Response(request.method === "HEAD" ? null : messages[status] + "\n", {
+        status, headers: withCors(new Headers({"Cache-Control": "no-store"}))
+    });
+}
+
+function tags(value) {
+    return value.match(/(?:W\/)?"[^"]*"/g) || [];
+}
+
+function httpDate(value) {
+    // HTTP permits these three date formats; Date.parse also accepts unrelated inputs.
+    const modern = /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+    const obsolete = /^[A-Z][a-z]+, \d{2}-[A-Z][a-z]{2}-\d{2} \d{2}:\d{2}:\d{2} GMT$/;
+    const asctime = /^[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/;
+    if (asctime.test(value)) return Date.parse(value + " GMT");
+    return modern.test(value) || obsolete.test(value) ? Date.parse(value) : NaN;
+}
+
+function condition(headers, object) {
+    const match = headers.get("If-Match"), none = headers.get("If-None-Match");
+    const modified = Date.parse(object.uploaded.toUTCString());
+    // RFC 9110: entity tags take precedence over the corresponding date condition.
+    if (match !== null) {
+        if (match !== "*" && !tags(match).includes(object.httpEtag)) return 412;
+    } else if (modified > httpDate(headers.get("If-Unmodified-Since"))) return 412;
+    if (none !== null) {
+        if (none === "*" || tags(none).some(tag => tag.replace(/^W\//, "") === object.httpEtag)) return 304;
+    } else if (modified <= httpDate(headers.get("If-Modified-Since"))) return 304;
+    return 0;
+}
+
+function rangeFor(value, size) {
+    // Unsupported units and multipart ranges are ignored, as HTTP permits.
+    const match = /^bytes=(\d*)-(\d*)$/.exec(value || "");
+    if (!match || (!match[1] && !match[2])) return null;
+    const start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2]));
+    const end = match[1] && match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
+    if (start >= size || end < start) return {status: 416};
+    return {offset: start, length: end - start + 1};
+}
+
+async function read(request, bucket, ctx, key) {
+    const cache = caches.default;
+    const wantsRange = request.method === "GET" && request.headers.has("Range");
+    const conditional = CONDITIONAL_HEADERS.some(name => request.headers.has(name));
+    if (request.method === "GET" && !wantsRange && !conditional) {
+        const hit = await cache.match(request).catch(() => null);
+        if (hit) return hit;
+        const object = await bucket.get(key);
+        if (!object) return failure(404, request);
+        const response = new Response(object.body, {headers: headersFor(object, key)});
+        ctx.waitUntil(cache.put(request, response.clone()).catch(() => {}));
+        return response;
+    }
+
+    // Conditional/range requests bypass edge-cache condition semantics. Pin the body to
+    // the checked version so a refresh between HEAD and GET cannot mix representations.
+    for (let attempt = 0; attempt < MAX_READ_ATTEMPTS; attempt++) {
+        const meta = await bucket.head(key);
+        if (!meta) return failure(404, request);
+        const headers = headersFor(meta, key);
+        const status = condition(request.headers, meta);
+        if (status) return new Response(null, {status, headers});
+        if (request.method === "HEAD") {
+            headers.set("Content-Length", String(meta.size));
+            return new Response(null, {headers});
+        }
+        const ifRange = request.headers.get("If-Range");
+        // R2 upload dates cannot prove there was only one version within a second.
+        // Treat date/weak validators as unverified and send the full representation.
+        const range = wantsRange && (ifRange === null || ifRange === meta.httpEtag)
+            ? rangeFor(request.headers.get("Range"), meta.size) : null;
+        if (range?.status === 416) {
+            headers.set("Content-Range", `bytes */${meta.size}`);
+            return new Response(null, {status: 416, headers});
+        }
+        const object = await bucket.get(key, {onlyIf: {etagMatches: meta.etag}, range: range || undefined});
+        if (!object) return failure(404, request);
+        if (!object.body) continue;
+        if (object.version !== meta.version) {
+            await object.body.cancel();
+            continue;
+        }
+        if (range) {
+            headers.set("Content-Range", `bytes ${range.offset}-${range.offset + range.length - 1}/${meta.size}`);
+            headers.set("Content-Length", String(range.length));
+        }
+        return new Response(object.body, {status: range ? 206 : 200, headers});
+    }
+    return failure(503, request);
 }
 
 export default {
@@ -61,77 +172,26 @@ export default {
         if (request.method === "OPTIONS") {
             return new Response(null, {status: 204, headers: withCors(new Headers({
                 "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                "Access-Control-Allow-Headers": ["Range", ...CONDITIONAL_HEADERS].join(", "),
                 "Access-Control-Max-Age": "86400"
             }))});
         }
         if (request.method !== "GET" && request.method !== "HEAD") {
             return new Response("method not allowed\n",
-                {status: 405, headers: {"Allow": "GET, HEAD, OPTIONS"}});
+                {status: 405, headers: withCors(new Headers({"Allow": "GET, HEAD, OPTIONS"}))});
         }
-
-        const url = new URL(request.url);
-        const key = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-        if (!key || key.includes("..")) return new Response("not found\n", {status: 404});
-
-        function finish(headers, contentType) {
-            headers.set("Cache-Control", (headers.get("Cache-Control") ||
-                (/^current-/.test(key) ? FALLBACK_CACHE_CONTROL.volatile
-                                       : FALLBACK_CACHE_CONTROL.immutable)) +
-                (isPixelData(contentType) ? ", no-transform" : ""));
-            headers.set("Accept-Ranges", "bytes");
-            return withCors(headers);
+        let key;
+        try {
+            key = decodeURIComponent(new URL(request.url).pathname.replace(/^\/+/, ""));
+            if (key.includes("\0")) return failure(400, request);
+        } catch {
+            return failure(400, request);
         }
-
-        // HEAD is answered from metadata alone; going through the GET path would build a
-        // response around the object stream and then discard it, leaving the body dangling.
-        if (request.method === "HEAD") {
-            const meta = await env.BUCKET.head(key);
-            if (meta === null) return new Response("not found\n", {status: 404});
-            const headers = new Headers();
-            meta.writeHttpMetadata(headers);
-            headers.set("ETag", meta.httpEtag);
-            headers.set("Content-Length", String(meta.size));
-            return new Response(null,
-                {status: 200, headers: finish(headers, headers.get("Content-Type"))});
+        if (!key || key.includes("..")) return failure(404, request);
+        try {
+            return await read(request, env.BUCKET, ctx, key);
+        } catch {
+            return failure(502, request);
         }
-
-        // Range requests bypass the cache: caching a partial body under a whole-object key
-        // would be wrong, and nothing in the site issues one.
-        const wantsRange = request.headers.has("Range");
-        const cache = caches.default;
-        // Keyed by URL alone. The bodies stored here are unencoded, so unlike the previous
-        // design there is no encoding to key on — the edge holds its own variant per encoding
-        // in front of this.
-        if (!wantsRange) {
-            const hit = await cache.match(request);
-            if (hit) return hit;
-        }
-
-        const object = await env.BUCKET.get(key, {
-            range: wantsRange ? request.headers : undefined,
-            onlyIf: request.headers
-        });
-        if (object === null) return new Response("not found\n", {status: 404});
-
-        const headers = new Headers();
-        object.writeHttpMetadata(headers);      // content-type, -encoding, -language, cache-control
-        headers.set("ETag", object.httpEtag);
-        finish(headers, headers.get("Content-Type"));
-
-        // A conditional request R2 satisfied comes back with no body.
-        if (!object.body) return new Response(null, {status: 304, headers});
-
-        if (wantsRange && object.range) {
-            const {offset = 0, length} = object.range;
-            const end = offset + (length ?? (object.size - offset)) - 1;
-            headers.set("Content-Range", `bytes ${offset}-${end}/${object.size}`);
-            return new Response(object.body, {status: 206, headers});
-        }
-
-        const response = new Response(object.body, {status: 200, headers});
-        // clone() tees the stream: one copy to the edge cache, one to the client, so a 24 MB
-        // object is never buffered whole in the isolate.
-        ctx.waitUntil(cache.put(request, response.clone()));
-        return response;
     }
 };

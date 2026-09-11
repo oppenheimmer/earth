@@ -46,7 +46,11 @@ BUCKET="${R2_BUCKET:-earth-data}"
 ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
 cd "$(dirname "$0")/../public/data"
-for f in current-*.json; do
+# Check the entire batch before the first remote object can be replaced.
+shopt -s nullglob
+files=(current-*.json)
+python3 ../../scripts/datasets.py "${files[@]}"
+for f in "${files[@]}"; do
     # max-age matches the vercel.json data header; must-revalidate keeps browsers
     # honest across the 6-hourly refresh cadence. No content-encoding: the object
     # is plain JSON and the edge encodes it per request.
