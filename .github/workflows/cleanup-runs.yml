@@ -1,4 +1,4 @@
-name: Cleanup old Actions runs
+name: Cleanup old runs
 
 on:
   schedule:

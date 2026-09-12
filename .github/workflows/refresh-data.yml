@@ -1,4 +1,4 @@
-name: refresh-data
+name: Refresh data
 on:
   schedule:
     # The same four firings as "45 */6 * * *", split into two entries so the
