@@ -1,0 +1,49 @@
+name: Cleanup old Actions runs
+
+on:
+  schedule:
+    # Every Sunday at 03:00 UTC
+    - cron: "0 3 * * 0"
+
+  # Also allow running it manually
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clean old workflow runs
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_CLEANUP_TOKEN }}
+          KEEP_RUNS: "1"
+
+        run: |
+          set -euo pipefail
+
+          repos=(
+            "oppenheimmer/earth"
+            "oppenheimmer/astra"
+          )
+
+          for repo in "${repos[@]}"; do
+            echo "Cleaning $repo"
+
+            mapfile -t runs < <(
+              gh run list \
+                --repo "$repo" \
+                --status completed \
+                --limit 1000 \
+                --json databaseId \
+                --jq ".[$KEEP_RUNS:][].databaseId"
+            )
+
+            echo "Found ${#runs[@]} old runs to delete"
+
+            for id in "${runs[@]}"; do
+              echo "Deleting $repo run $id"
+              gh run delete "$id" --repo "$repo"
+            done
+          done
