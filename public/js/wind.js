@@ -1,5 +1,5 @@
 /**
- * wind.js — animated global wind visualization.
+ * animated global wind visualization.
  *
  * A minimal replica of the "colorful wind" mode of https://earth.nullschool.net.
  * The core algorithms — GFS grid bilinear interpolation, projection distortion of wind
@@ -24,7 +24,7 @@
     var NULL_WIND_VECTOR = [NaN, NaN, null];  // no wind data at this location [u, v, mag]
     var TRANSPARENT_BLACK = [0, 0, 0, 0];
     var NO_DATA_GRAY = [51, 51, 56, 255];     // sentinel for "ocean layer, no value here"; the write
-                                              // sites swap it for the hatch below (see noDataHatchAt)
+    // sites swap it for the hatch below (see noDataHatchAt)
     // Dataless water on an ocean layer is hatched, not filled flat. The depth layers stop wherever
     // the sea floor rises above them, so at 450 m whole shelf seas — North Sea, Irish Sea, Channel,
     // Sunda — carry no value; painting them the land charcoal made them read as land, which they
@@ -41,7 +41,7 @@
     var MAX_ZOOM = 64;                        // max zoom, ×fitted scale (was 8 — country level; 64 reaches prefecture level; nullschool's absolute extent is [50, 250000] px)
     var DETAIL_ZOOM = 4;                      // zoom (×fitted scale) beyond which the idle map draws lazily-fetched 10m geometry — 50m lines look coarse past ~8×
 
-    var view = {width: window.innerWidth, height: window.innerHeight};
+    var view = { width: window.innerWidth, height: window.innerHeight };
 
     // ------------------------------------------------------------------------------------------------
     // Color scales (ported from micro.js)
@@ -238,9 +238,9 @@
             // of retreating half a cell from every coast (blocky staircase against the land).
             var u = 0, v = 0, w = 0, k;
             if (!isNaN(row0[i0])) { k = rx * ry; u += row0[i0] * k; v += row0[i0 + 1] * k; w += k; }
-            if (!isNaN(row0[i1])) { k = x * ry;  u += row0[i1] * k; v += row0[i1 + 1] * k; w += k; }
-            if (!isNaN(row1[i0])) { k = rx * y;  u += row1[i0] * k; v += row1[i0 + 1] * k; w += k; }
-            if (!isNaN(row1[i1])) { k = x * y;   u += row1[i1] * k; v += row1[i1 + 1] * k; w += k; }
+            if (!isNaN(row0[i1])) { k = x * ry; u += row0[i1] * k; v += row0[i1 + 1] * k; w += k; }
+            if (!isNaN(row1[i0])) { k = rx * y; u += row1[i0] * k; v += row1[i0 + 1] * k; w += k; }
+            if (!isNaN(row1[i1])) { k = x * y; u += row1[i1] * k; v += row1[i1 + 1] * k; w += k; }
             if (w === 0) return null;  // all four corners are holes
             u /= w;
             v /= w;
@@ -250,7 +250,7 @@
         var refTime = new Date(header.refTime);
         var validTime = new Date(refTime.getTime() + (header.forecastTime || 0) * 3600 * 1000);
 
-        return {interpolate: interpolate, date: validTime, maxSpeed: Math.sqrt(maxSpeed2)};
+        return { interpolate: interpolate, date: validTime, maxSpeed: Math.sqrt(maxSpeed2) };
     }
 
     /**
@@ -286,13 +286,13 @@
             if (!row0 || !row1) return null;
             var x = i - fi, y = j - fj;
             var v = row0[fi] * (1 - x) * (1 - y) + row0[ci] * x * (1 - y) +
-                    row1[fi] * (1 - x) * y + row1[ci] * x * y;
+                row1[fi] * (1 - x) * y + row1[ci] * x * y;
             return isNaN(v) ? null : v;
         }
 
         var refTime = new Date(header.refTime);
         var validTime = new Date(refTime.getTime() + (header.forecastTime || 0) * 3600 * 1000);
-        return {interpolate: interpolate, date: validTime};
+        return { interpolate: interpolate, date: validTime };
     }
 
     /** 256-entry [r,g,b] lookup table from a d3 colormap interpolator (t in [0,1]). */
@@ -366,12 +366,12 @@
 
     /** Visible bounds of the globe within the viewport, in integer pixels. */
     function globeBounds() {
-        var b = d3.geoPath(projection).bounds({type: "Sphere"});
+        var b = d3.geoPath(projection).bounds({ type: "Sphere" });
         var x = Math.max(Math.floor(b[0][0]), 0);
         var y = Math.max(Math.floor(b[0][1]), 0);
         var xMax = Math.min(Math.ceil(b[1][0]), view.width - 1);
         var yMax = Math.min(Math.ceil(b[1][1]), view.height - 1);
-        return {x: x, y: y, xMax: xMax, yMax: yMax, width: xMax - x + 1, height: yMax - y + 1};
+        return { x: x, y: y, xMax: xMax, yMax: yMax, width: xMax - x + 1, height: yMax - y + 1 };
     }
 
     /**
@@ -495,7 +495,7 @@
                         worker.terminate();
                         reject(new Error("detail worker: " + (err.message || "failed")));
                     };
-                    worker.postMessage({url: new URL(url, location.href).href});
+                    worker.postMessage({ url: new URL(url, location.href).href });
                 });
             }
             catch (err) {
@@ -513,7 +513,7 @@
             // more than half the sphere (> τ steradians) is one of them: reversing all its
             // rings restores it while leaving real holes (the Caspian) alone.
             land.coordinates.forEach(function (poly) {
-                if (d3.geoArea({type: "Polygon", coordinates: poly}) > τ) {
+                if (d3.geoArea({ type: "Polygon", coordinates: poly }) > τ) {
                     poly.forEach(function (ring) { ring.reverse(); });
                 }
             });
@@ -552,11 +552,11 @@
         var path = d3.geoPath(projection, ctx);
         ctx.clearRect(0, 0, view.width, view.height);
         ctx.beginPath();
-        path({type: "Sphere"});
+        path({ type: "Sphere" });
         ctx.fillStyle = "#101018";
         ctx.fill();
         if (!activeRenderer) {
-            strokeOn(ctx, path, {type: "Sphere"}, 0.25, 1.2);
+            strokeOn(ctx, path, { type: "Sphere" }, 0.25, 1.2);
             strokeOn(ctx, path, d3.geoGraticule10(), 0.12, 0.75);
         }
 
@@ -594,12 +594,12 @@
         var canvas = document.createElement("canvas");
         canvas.width = view.width;
         canvas.height = view.height;
-        var ctx = canvas.getContext("2d", {willReadFrequently: true});
+        var ctx = canvas.getContext("2d", { willReadFrequently: true });
         // Sentinel fill marking on-globe pixels; magenta is unreachable by the sinebow scale,
         // so leftovers at the antialiased rim can be erased safely after interpolation.
         ctx.fillStyle = "rgba(255, 0, 255, 1)";
         ctx.beginPath();
-        d3.geoPath(projection, ctx)({type: "Sphere"});
+        d3.geoPath(projection, ctx)({ type: "Sphere" });
         ctx.fill();
 
         var imageData = ctx.getImageData(0, 0, view.width, view.height);
@@ -772,7 +772,7 @@
             c.width = w;
             c.height = h;
             var ctx = c.getContext("2d");
-            preview = {canvas: c, ctx: ctx, image: ctx.createImageData(w, h), w: w, h: h};
+            preview = { canvas: c, ctx: ctx, image: ctx.createImageData(w, h), w: w, h: h };
         }
         var data = preview.image.data;
         data.fill(0);
@@ -892,7 +892,7 @@
 
         var particles = [];
         for (var i = 0; i < particleCount; i++) {
-            particles.push(field.randomize({age: Math.floor(Math.random() * maxAge)}));
+            particles.push(field.randomize({ age: Math.floor(Math.random() * maxAge) }));
         }
 
         function evolve() {
@@ -1094,8 +1094,10 @@
     // brightnessFloor pins the pre-whitening 130: the currents' strokes were never thinned and
     // their fast cores already run near-white, so the wind layers' brighter floor would blow
     // the Kuroshio/Gulf Stream out rather than lift faint trails.
-    var OCEAN_PARTICLES = {velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7,
-        brightnessFloor: 130};
+    var OCEAN_PARTICLES = {
+        velocityScale: 1 / 1700, maxIntensity: 0.7, multiplier: 4, lineWidth: 1.7,
+        brightnessFloor: 130
+    };
     var OCEAN_PLACEHOLDER = "click a point for current speed";
     // Ocean overlays render dimmer than the atmosphere's OVERLAY_ALPHA: the near-black
     // sphere bleeds through, deepening the calm-sea colors so the trails/crests read on top.
@@ -1133,69 +1135,86 @@
     // faster waves visibly brighter than slow chop. The tiny velocityScale keeps the
     // crests barely creeping (waves are localized and far slower than winds); maxAge/fade
     // give each dash a soft ease-in/out with no trailing smear at that near-static speed.
-    var WAVE_PARTICLES = {velocityScale: 1 / 360000, maxIntensity: 22, multiplier: 3,
-        lineWidth: 2.5, maxAge: 20, fade: 0.72, crestLength: 4.5, brightnessFloor: 40};
+    var WAVE_PARTICLES = {
+        velocityScale: 1 / 360000, maxIntensity: 22, multiplier: 3,
+        lineWidth: 2.5, maxAge: 20, fade: 0.72, crestLength: 4.5, brightnessFloor: 40
+    };
     var LAYERS = Object.assign(Object.create(null), {
-        "surface": {file: SURFACE_WIND, label: "Wind @ Surface"},
-        "1000hpa": {file: DATA_ROOT + "current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa"},
-        "500hpa": {file: DATA_ROOT + "current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa"},
-        "10hpa": {file: DATA_ROOT + "current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa"},
-        "temperature": {file: SURFACE_WIND, label: "Temperature @ Surface", scalar: {
-            file: DATA_ROOT + "current-temp-surface-level-gfs-0.25.json",
-            // bwr diverging, domain -10–45 °C (user spec, was ±50): the populated range
-            // gets the color stretch; beyond the endpoints pins to the end colors via
-            // the clamped LUT index. White midpoint sits at 17.5 °C.
-            lut: colormapLut(bwrInterpolator),
-            min: 263.15, max: 318.15,  // -10 – 45 °C
-            scaleLabel: "-10 &ndash; 45 &deg;C",
-            format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
-        }},
-        "rh": {file: SURFACE_WIND, label: "Rel. Humidity @ Surface", scalar: {
-            file: DATA_ROOT + "current-rh-surface-level-gfs-0.25.json",
-            lut: colormapLut(d3.interpolateBuPu),  // Purples → BuPu for better contrast (user preference)
-            min: 0, max: 100,
-            scaleLabel: "0 &ndash; 100 %",
-            format: function (v) { return v.toFixed(0) + " %"; }
-        }},
-        "dew": {file: SURFACE_WIND, label: "Dew Point @ Surface", scalar: {
-            file: DATA_ROOT + "current-dewpoint-surface-level-gfs-0.25.json",
-            lut: colormapLut(d3.interpolatePuBuGn),
-            min: 233.15, max: 308.15,  // -40 – 35 °C
-            scaleLabel: "-40 &ndash; 35 &deg;C",
-            format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
-        }},
-        "ocean": {file: OCEAN_CURRENTS, label: "Ocean Currents @ Surface",
+        "surface": { file: SURFACE_WIND, label: "Wind @ Surface" },
+        "1000hpa": { file: DATA_ROOT + "current-wind-1000hpa-gfs-0.25.json", label: "Wind @ 1000 hPa" },
+        "500hpa": { file: DATA_ROOT + "current-wind-500hpa-gfs-0.25.json", label: "Wind @ 500 hPa" },
+        "10hpa": { file: DATA_ROOT + "current-wind-10hpa-gfs-0.25.json", label: "Wind @ 10 hPa" },
+        "temperature": {
+            file: SURFACE_WIND, label: "Temperature @ Surface", scalar: {
+                file: DATA_ROOT + "current-temp-surface-level-gfs-0.25.json",
+                // bwr diverging, domain -10–45 °C (user spec, was ±50): the populated range
+                // gets the color stretch; beyond the endpoints pins to the end colors via
+                // the clamped LUT index. White midpoint sits at 17.5 °C.
+                lut: colormapLut(bwrInterpolator),
+                min: 263.15, max: 318.15,  // -10 – 45 °C
+                scaleLabel: "-10 &ndash; 45 &deg;C",
+                format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
+            }
+        },
+        "rh": {
+            file: SURFACE_WIND, label: "Rel. Humidity @ Surface", scalar: {
+                file: DATA_ROOT + "current-rh-surface-level-gfs-0.25.json",
+                lut: colormapLut(d3.interpolateBuPu),  // Purples → BuPu for better contrast (user preference)
+                min: 0, max: 100,
+                scaleLabel: "0 &ndash; 100 %",
+                format: function (v) { return v.toFixed(0) + " %"; }
+            }
+        },
+        "dew": {
+            file: SURFACE_WIND, label: "Dew Point @ Surface", scalar: {
+                file: DATA_ROOT + "current-dewpoint-surface-level-gfs-0.25.json",
+                lut: colormapLut(d3.interpolatePuBuGn),
+                min: 233.15, max: 308.15,  // -40 – 35 °C
+                scaleLabel: "-40 &ndash; 35 &deg;C",
+                format: function (v) { return (v - 273.15).toFixed(1) + " °C"; }
+            }
+        },
+        "ocean": {
+            file: OCEAN_CURRENTS, label: "Ocean Currents @ Surface",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true,  // charcoal continents above the overlay, nullschool-style
             placeholder: OCEAN_PLACEHOLDER,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
-            scalar: CURRENT_SPEED_SCALAR},
+            scalar: CURRENT_SPEED_SCALAR
+        },
         // 25.21 m: near the base of the tropical mixed layer — the flow starts diverging
         // from the wind-driven surface drift (user pick, was 109.73 m).
-        "ocean25": {file: DATA_ROOT + "current-ocean-currents-25m-cmems-0.25.json",
+        "ocean25": {
+            file: DATA_ROOT + "current-ocean-currents-25m-cmems-0.25.json",
             label: "Ocean Currents @ 25 m",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true, placeholder: OCEAN_PLACEHOLDER,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
-            scalar: CURRENT_SPEED_SCALAR},
+            scalar: CURRENT_SPEED_SCALAR
+        },
         // 109.73 m: below the seasonal thermocline — the wind-driven signal is gone
         // and the flow is dominated by the large-scale gyres.
-        "ocean110": {file: DATA_ROOT + "current-ocean-currents-110m-cmems-0.25.json",
+        "ocean110": {
+            file: DATA_ROOT + "current-ocean-currents-110m-cmems-0.25.json",
             label: "Ocean Currents @ 110 m",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true, placeholder: OCEAN_PLACEHOLDER,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
-            scalar: CURRENT_SPEED_SCALAR},
+            scalar: CURRENT_SPEED_SCALAR
+        },
         // 453.94 m: intermediate water. Speeds here are far below the 1.5 m/s
         // surface domain, so most of the map sits at the palette's deep-blue end —
         // that is the physical result, not a scaling bug.
-        "ocean450": {file: DATA_ROOT + "current-ocean-currents-450m-cmems-0.25.json",
+        "ocean450": {
+            file: DATA_ROOT + "current-ocean-currents-450m-cmems-0.25.json",
             label: "Ocean Currents @ 450 m",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true, placeholder: OCEAN_PLACEHOLDER,
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
-            scalar: CURRENT_SPEED_SCALAR},
-        "sst": {file: OCEAN_CURRENTS, label: "Sea Water Temperature @ Surface",
+            scalar: CURRENT_SPEED_SCALAR
+        },
+        "sst": {
+            file: OCEAN_CURRENTS, label: "Sea Water Temperature @ Surface",
             credit: OCEAN_CREDIT, dateLabel: OCEAN_DATE_LABEL,
             landFill: true, placeholder: "click a point for sea temperature",
             particles: OCEAN_PARTICLES, flowFormat: metersPerSecond,
@@ -1209,8 +1228,10 @@
                 min: 0, max: 35,
                 scaleLabel: "0 &ndash; 35 &deg;C",
                 format: function (v) { return v.toFixed(1) + " °C"; }
-            }},
-        "waves": {file: WAVE_FLOW, label: "Ocean Waves",
+            }
+        },
+        "waves": {
+            file: WAVE_FLOW, label: "Ocean Waves",
             credit: WAVE_CREDIT, dateLabel: WAVE_DATE_LABEL,
             landFill: true, placeholder: "click a point for wave height",
             particles: WAVE_PARTICLES, flowFormat: seconds,
@@ -1230,7 +1251,8 @@
                 min: 0, max: 15,
                 scaleLabel: "0 &ndash; 15 m",
                 format: function (v) { return v.toFixed(1) + " m"; }
-            }}
+            }
+        }
     });
 
     // ------------------------------------------------------------------------------------------------
@@ -1374,11 +1396,11 @@
 
     var DEFAULT_LAYER = "surface";
     var DEFAULT_CREDIT = "GFS 0.25&deg; &nbsp;|&nbsp; NCEP / US National Weather Service";
-    var DEFAULT_PARTICLES = {velocityScale: VELOCITY_SCALE, maxIntensity: MAX_INTENSITY};
+    var DEFAULT_PARTICLES = { velocityScale: VELOCITY_SCALE, maxIntensity: MAX_INTENSITY };
     var KMH = function (v) { return (v * 3.6).toFixed(0) + " km/h"; };  // default flow readout
     var DEFAULT_PLACEHOLDER = "click a point for wind speed";
 
-    var currentCancel = {requested: false};
+    var currentCancel = { requested: false };
     var recomputeTimer = null;
     var grid = null;
     var scalarGrid = null;    // secondary scalar field of the current layer, or null
@@ -1393,7 +1415,7 @@
 
     function cancelWork() {
         currentCancel.requested = true;
-        currentCancel = {requested: false};
+        currentCancel = { requested: false };
         return currentCancel;
     }
 
@@ -1509,7 +1531,7 @@
             var preload = window.__earthPreload;
             // take() is single-use: the boot prefetch holds each promise until someone claims it.
             pendingJson[url] = (preload && preload.take(url)) ||
-                fetch(url, {cache: "no-cache"}).then(function (r) {
+                fetch(url, { cache: "no-cache" }).then(function (r) {
                     if (!r.ok) throw new Error("HTTP " + r.status);
                     return r.json();
                 });
@@ -1555,7 +1577,7 @@
         var layer = LAYERS[id];
         if (!layer) {
             var spec = deferredFor(id);
-            if (spec) loadDeferred(spec).catch(function () {});   // the scripts, not the imagery
+            if (spec) loadDeferred(spec).catch(function () { });   // the scripts, not the imagery
             return;
         }
         if (layer.renderer) {
@@ -1759,7 +1781,7 @@
             projection.scale(clampScale(projection.scale() * k));
             drawManipulationFrame();
             scheduleRecompute();
-        }, {passive: false});
+        }, { passive: false });
 
         // Pinch zoom: the scale tracks the ratio of finger spread to its value at
         // gesture start, which keeps it absolute — no drift over a long pinch — and
@@ -1776,7 +1798,7 @@
         // the closing touchend was swallowed too whenever finger 1 was the last to lift,
         // leaving `pinching` set and the globe unrotatable until reload. Capturing on
         // #display runs these handlers before d3 gets the chance.
-        var CAPTURE = {passive: false, capture: true};
+        var CAPTURE = { passive: false, capture: true };
         var node = display.node();
         node.addEventListener("touchstart", function (event) {
             if (event.touches.length !== 2) return;
@@ -1813,7 +1835,7 @@
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(function () {
             startManipulation();
-            view = {width: window.innerWidth, height: window.innerHeight};
+            view = { width: window.innerWidth, height: window.innerHeight };
             var relativeScale = projection.scale() / initialScale;
             sizeCanvases();
             initialScale = Math.min(view.width, view.height) * 0.42;
@@ -1893,7 +1915,7 @@
             // "no-cache" = always revalidate with the server (cheap 304 when unchanged),
             // so a refreshed topology shows up on plain reload instead of being served
             // stale from the browser's heuristic cache. Wind data loads via loadLayer().
-            fetch("data/earth-topo.json", {cache: "no-cache"}).then(function (r) {
+            fetch("data/earth-topo.json", { cache: "no-cache" }).then(function (r) {
                 if (!r.ok) throw new Error("topology: HTTP " + r.status);
                 return r.json();
             }),
@@ -1942,7 +1964,7 @@
                 });
             });
         };
-        if (window.requestIdleCallback) window.requestIdleCallback(warm, {timeout: 8000});
+        if (window.requestIdleCallback) window.requestIdleCallback(warm, { timeout: 8000 });
         else setTimeout(warm, 3000);
     }
 
