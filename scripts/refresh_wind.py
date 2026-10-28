@@ -7,10 +7,11 @@ writes them in grib2json-compatible format (the subset of header fields js/wind.
 No Java/grib2json needed — decoding is done with pygrib.
 
 Usage:
-    python3 -m venv gribenv && ./gribenv/bin/pip install pygrib
-    ./gribenv/bin/python scripts/refresh_wind.py                     # surface (10 m) wind
-    ./gribenv/bin/python scripts/refresh_wind.py 500hpa              # a pressure level
-    ./gribenv/bin/python scripts/refresh_wind.py 500hpa file.grib2   # convert a local GRIB2
+    python3.14 -m venv .venv
+    .venv/bin/python -m pip install --only-binary=:all: -r requirements.txt
+    .venv/bin/python scripts/refresh_wind.py                     # surface (10 m) wind
+    .venv/bin/python scripts/refresh_wind.py 500hpa              # a pressure level
+    .venv/bin/python scripts/refresh_wind.py 500hpa file.grib2   # convert a local GRIB2
 
 Wind levels: surface, 1000hpa, 500hpa, 10hpa (see LEVELS — two records, u then v).
 Scalar overlays: temperature, rh, dew (see SCALARS — one record, 2 m above ground).

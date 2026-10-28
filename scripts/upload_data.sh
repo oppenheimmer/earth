@@ -28,7 +28,7 @@
 # unaffected. brotli is no longer needed on PATH.
 #
 # R2 is S3-compatible, so this uses the AWS CLI (preinstalled on GitHub
-# runners; locally: pip install awscli). Required environment:
+# runners; locally: install requirements.txt and activate .venv). Required environment:
 #
 #   R2_ACCOUNT_ID             Cloudflare account id (dashboard sidebar)
 #   AWS_ACCESS_KEY_ID         R2 API token key   (R2 → Manage API Tokens)

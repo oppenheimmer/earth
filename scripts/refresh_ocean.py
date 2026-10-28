@@ -22,22 +22,22 @@ access does not work: the ARCO zarr store serves metadata and coordinate arrays
 publicly but returns 403 for every data chunk.
 
 Usage:
-    python3 -m venv gribenv
-    ./gribenv/bin/pip install copernicusmarine
+    python3.14 -m venv .venv
+    .venv/bin/python -m pip install --only-binary=:all: -r requirements.txt
 
-    # Refresh ALL three products for today UTC:
-    ./gribenv/bin/python scripts/refresh_ocean.py
+    # Refresh ALL five products for today UTC:
+    .venv/bin/python scripts/refresh_ocean.py
 
-    # Refresh ALL three products for a specific date:
-    ./gribenv/bin/python scripts/refresh_ocean.py 2026-07-11
+    # Refresh ALL five products for a specific date:
+    .venv/bin/python scripts/refresh_ocean.py 2026-07-11
 
     # Refresh only one product for today UTC:
-    ./gribenv/bin/python scripts/refresh_ocean.py currents
-    ./gribenv/bin/python scripts/refresh_ocean.py currents25
-    ./gribenv/bin/python scripts/refresh_ocean.py temperature
+    .venv/bin/python scripts/refresh_ocean.py currents
+    .venv/bin/python scripts/refresh_ocean.py currents25
+    .venv/bin/python scripts/refresh_ocean.py temperature
 
     # Refresh only one product for a specific date:
-    ./gribenv/bin/python scripts/refresh_ocean.py currents 2026-07-11
+    .venv/bin/python scripts/refresh_ocean.py currents 2026-07-11
 
 Reads the 1/12° ARCO store and coarsens x3 down to 1/4° (atmosphere-grid parity).
 

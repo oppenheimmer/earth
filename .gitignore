@@ -5,6 +5,8 @@ node_modules
 CLAUDE.md
 AGENTS.md
 __pycache__/
+# Local Python environment; rebuild from requirements.txt on a new machine.
+/.venv/
 # wrangler's local cache: holds the Cloudflare account id and OAuth state.
 worker/.wrangler/
 .env/

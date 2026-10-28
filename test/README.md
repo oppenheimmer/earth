@@ -13,13 +13,17 @@ Chromium's sandbox is enabled by default. On hosts that cannot support it, expli
 set `EARTH_CHROME_SANDBOX=disabled` for the test command. Startup failures never
 disable it automatically. Each browser owns its debugging port and temporary files.
 
-For converter tests, use a Python 3.12 virtual environment:
+For converter tests, use the project-local Python 3.14 environment:
 
 ```sh
-python -m pip install --only-binary=:all: -r scripts/refresh-requirements.txt
+python3.14 -m venv .venv
+.venv/bin/python -m pip install --only-binary=:all: -r requirements.txt
+source .venv/bin/activate
 python -B test/test_datasets.py
 python -B test/test_grib.py
 ```
+
+CI uses Python 3.12 and `scripts/refresh-requirements.txt` instead.
 
 Uploads are replaced by a recording stub. Write-failure tests use temporary files.
 

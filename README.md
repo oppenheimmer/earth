@@ -84,6 +84,8 @@ what is fetched when, in what order, and over what — is its own section:
 ├── README.md
 ├── asset/view.png               # the screenshot above
 ├── .env/                        # git-ignored credentials: copernicusmarine, r2
+├── .venv/                       # git-ignored local Python environment
+├── requirements.txt             # pinned local Python 3.14 tooling, including AWS CLI
 ├── .github/workflows/
 │   └── refresh-data.yml         # 6-hourly refresh of all 14 datasets → R2 (no commits, no deploys)
 ├── worker/                      # Cloudflare Worker fronting the R2 bucket (see Serving)
@@ -812,20 +814,34 @@ the job at render time.
 
 ### Refreshing the data
 
-```bash
-# The shared venv holds pygrib, numpy, copernicusmarine and the AWS CLI.
-# If ~/.venvs/aws/bin is not in PATH, use the full paths below.
+Create the project-local environment from the repository root using Python 3.14:
 
-~/.venvs/aws/bin/python scripts/refresh_wind.py               # surface (10 m) wind
-~/.venvs/aws/bin/python scripts/refresh_wind.py 500hpa        # or 1000hpa, 10hpa
-~/.venvs/aws/bin/python scripts/refresh_wind.py temperature   # or rh, dew (2 m scalars)
-~/.venvs/aws/bin/python scripts/refresh_waves.py              # both wave files from one download
+```bash
+python3.14 -m venv .venv
+.venv/bin/python -m pip install --only-binary=:all: -r requirements.txt
+source .venv/bin/activate
+```
+
+`requirements.txt` pins the local refresh tools and AWS CLI. CI uses its separate
+Python 3.12 lock in `scripts/refresh-requirements.txt`. Activate `.venv` in each new
+terminal before refreshing or uploading data.
+
+When migrating to a clean machine, install Python 3.14 and run these setup commands
+again: `.venv/` is git-ignored and contains paths and binaries specific to its machine.
+Restore the git-ignored `.env/` credentials separately. Weather datasets and imagery
+can be downloaded again as described in [Quick start](#quick-start).
+
+```bash
+python scripts/refresh_wind.py               # surface (10 m) wind
+python scripts/refresh_wind.py 500hpa        # or 1000hpa, 10hpa
+python scripts/refresh_wind.py temperature   # or rh, dew (2 m scalars)
+python scripts/refresh_waves.py              # both wave files from one download
 
 set -a && source .env/copernicusmarine && set +a
 
-~/.venvs/aws/bin/python scripts/refresh_ocean.py              # all five CMEMS products, today UTC
-~/.venvs/aws/bin/python scripts/refresh_ocean.py currents25   # one product
-~/.venvs/aws/bin/python scripts/refresh_ocean.py currents <YYYY-MM-DD>  # one product, given day
+python scripts/refresh_ocean.py              # all five CMEMS products, today UTC
+python scripts/refresh_ocean.py currents25   # one product
+python scripts/refresh_ocean.py currents <YYYY-MM-DD>  # one product, given day
 
 set -a && source .env/r2 && set +a
 ./scripts/upload_data.sh                                   # brotli + push current-*.json to R2

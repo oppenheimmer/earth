@@ -19,9 +19,10 @@ u/v and gets the Peak Wave Period overlay and the click readout for free via
 its fromMagnitude machinery — no third data file.
 
 Usage:
-    python3 -m venv gribenv && ./gribenv/bin/pip install pygrib
-    ./gribenv/bin/python scripts/refresh_waves.py                # newest cycle
-    ./gribenv/bin/python scripts/refresh_waves.py file.grib2     # convert local GRIB2
+    python3.14 -m venv .venv
+    .venv/bin/python -m pip install --only-binary=:all: -r requirements.txt
+    .venv/bin/python scripts/refresh_waves.py                # newest cycle
+    .venv/bin/python scripts/refresh_waves.py file.grib2     # convert local GRIB2
 """
 import math
 import os
