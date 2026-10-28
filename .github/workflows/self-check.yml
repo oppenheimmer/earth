@@ -1,0 +1,176 @@
+name: Self Check
+
+on:
+  pull_request:
+  push:
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} dependencies and converters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.12"
+            requirements: scripts/refresh-requirements.txt
+          - python: "3.14"
+            requirements: requirements.txt
+    env:
+      PYTHON_VERSION: ${{ matrix.python }}
+      REQUIREMENTS_FILE: ${{ matrix.requirements }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: ${{ matrix.requirements }}
+      - name: Install and validate dependencies
+        id: dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --only-binary=:all: -r "$REQUIREMENTS_FILE"
+          .venv/bin/python -m pip check
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Check shell syntax
+        run: |
+          for file in start.sh scripts/upload_data.sh scripts/upload_textures.sh scripts/fetch_textures.sh; do
+            bash -n "$file"
+          done
+      - name: Test shared behavior, wind and ocean converters, and native dependencies
+        id: tests
+        run: |
+          python -I -B -m unittest discover -s test -p 'test_*.py' -v 2>&1 | tee "$RUNNER_TEMP/python-tests.log"
+      - name: Summarize Python checks
+        if: always()
+        env:
+          DEPENDENCIES: ${{ steps.dependencies.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          {
+            printf '### Python %s\n\n' "$PYTHON_VERSION"
+            printf '| Check | Result |\n|---|---|\n'
+            printf '| Pinned dependencies | %s |\n' "$DEPENDENCIES"
+            printf '| Shared tests, wind and ocean pipelines, native codecs/storage | %s |\n' "$TESTS"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve Python test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: self-check-python-${{ matrix.python }}
+          path: ${{ runner.temp }}/python-tests.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  javascript:
+    name: JavaScript / ${{ matrix.title }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature: shared
+            title: Shared regressions
+          - feature: wind
+            title: Wind displays
+          - feature: ocean
+            title: Ocean displays
+          - feature: solar
+            title: Solar radiance display
+    env:
+      FEATURE: ${{ matrix.feature }}
+      FEATURE_TITLE: ${{ matrix.title }}
+      EARTH_CHROME_BINARY: google-chrome
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Verify Node and browser dependencies
+        id: dependencies
+        run: |
+          node --version
+          "$EARTH_CHROME_BINARY" --version
+          node --input-type=module -e 'import assert from "node:assert/strict"; assert.equal(typeof fetch, "function"); assert.equal(typeof WebSocket, "function");'
+      - name: Check JavaScript syntax
+        run: |
+          for file in public/js/*.js public/libs/*.js worker/index.js scripts/*.js test/*.mjs test/lib/*.mjs test/probes/*.js; do
+            node --check "$file"
+          done
+      - name: Run feature checks
+        id: tests
+        run: |
+          tests=()
+          if [[ "$FEATURE" == shared ]]; then
+            for file in test/*.test.mjs; do
+              [[ "$file" == test/features.test.mjs ]] || tests+=("$file")
+            done
+          else
+            export EARTH_TEST_FEATURE="$FEATURE"
+            tests=(test/features.test.mjs)
+          fi
+          node --test --test-isolation=none --test-concurrency=1 --test-reporter=tap "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/javascript-tests.log"
+      - name: Summarize feature checks
+        if: always()
+        env:
+          DEPENDENCIES: ${{ steps.dependencies.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          {
+            printf '### %s\n\n' "$FEATURE_TITLE"
+            printf '| Check | Result |\n|---|---|\n'
+            printf '| Node and browser dependencies | %s |\n' "$DEPENDENCIES"
+            printf '| Feature tests | %s |\n' "$TESTS"
+            printf '\nDetailed feature/subfeature results are in the TAP log artifact.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve feature results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: self-check-javascript-${{ matrix.feature }}
+          path: ${{ runner.temp }}/javascript-tests.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  ready:
+    name: Self-check / Ready to release
+    needs: [python, javascript]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHON_RESULT: ${{ needs.python.result }}
+      JAVASCRIPT_RESULT: ${{ needs.javascript.result }}
+    steps:
+      - name: Require every dependency and feature check to pass
+        run: |
+          {
+            printf '### Release readiness\n\n'
+            printf '| Required checks | Result |\n|---|---|\n'
+            printf '| Both Python environments and converter suites | %s |\n' "$PYTHON_RESULT"
+            printf '| Shared JS, wind, ocean and solar radiance suites | %s |\n' "$JAVASCRIPT_RESULT"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "$PYTHON_RESULT" == success && "$JAVASCRIPT_RESULT" == success ]]

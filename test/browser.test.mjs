@@ -9,14 +9,15 @@ import vm from "node:vm";
 const source = (await fs.readFile(new URL("./lib/browser.mjs", import.meta.url), "utf8"))
     .replace(/^import .*;\n/gm, "").replace(/export /g, "");
 
-async function fixture(t, mode = "enabled", outcome = "ready") {
+async function fixture(t, mode = "enabled", outcome = "ready", binary = null) {
     const directory = await fs.mkdtemp(join(tmpdir(), "earth-browser-check-"));
     t.after(() => fs.rm(directory, {recursive: true, force: true}));
     const children = [];
     let elapsed = 0;
     // Simulate process/CDP failures without launching a browser or waiting 20 seconds.
     const context = vm.createContext({
-        process: {env: mode === "default" ? {} : {EARTH_CHROME_SANDBOX: mode}},
+        process: {env: {...(mode === "default" ? {} : {EARTH_CHROME_SANDBOX: mode}),
+            ...(binary ? {EARTH_CHROME_BINARY: binary} : {})}},
         mkdtemp: fs.mkdtemp, rm: fs.rm, tmpdir: () => directory, join,
         readFile: async () => "9510\n/devtools/browser/fixture\n",
         setTimeout: callback => setTimeout(callback, 1), clearTimeout,
@@ -27,7 +28,7 @@ async function fixture(t, mode = "enabled", outcome = "ready") {
         },
         spawn: (bin, args, options) => {
             const child = new EventEmitter();
-            Object.assign(child, {args, options, exitCode: null, signalCode: null, stderr: new EventEmitter()});
+            Object.assign(child, {bin, args, options, exitCode: null, signalCode: null, stderr: new EventEmitter()});
             child.kill = signal => {
                 child.signalCode = signal;
                 queueMicrotask(() => child.emit("exit", null, signal));
@@ -68,6 +69,14 @@ test("sandbox disabling requires an explicit setting", async t => {
     const f = await fixture(t, "disabled");
     const browser = await f.launch();
     try { assert.ok(f.children[0].args.includes("--no-sandbox")); }
+    finally { await browser.close(); }
+    await f.clean();
+});
+
+test("an explicit browser binary selects the runtime checked by CI", async t => {
+    const f = await fixture(t, "enabled", "ready", "/fixture/google-chrome");
+    const browser = await f.launch();
+    try { assert.equal(f.children[0].bin, "/fixture/google-chrome"); }
     finally { await browser.close(); }
     await f.clean();
 });

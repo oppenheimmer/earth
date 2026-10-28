@@ -135,6 +135,42 @@ what is fetched when, in what order, and over what — is its own section:
 The topologies are static assets, not data: they stay in git and always load relative to the
 page, never through the R2 root.
 
+## Self-checks before release
+
+`.github/workflows/self-check.yml` checks pull requests, every push (including tags), merge
+queues and manual runs. It validates both pinned Python environments (3.12 for refresh CI,
+3.14 for local tooling), runs the JS/Python regressions, and groups display checks as:
+
+```text
+Wind displays
+├── Wind vectors: surface, 1000 hPa, 500 hPa, 10 hPa
+├── Surface scalars: temperature, humidity, dew point
+└── Particle animation and Python GRIB conversion
+Ocean displays
+├── Currents: surface, 25 m, 110 m, 450 m
+├── Sea water temperature
+├── Waves: height and propagation/period
+└── Particle animation and Python CMEMS/GRIB conversion
+Solar radiance display
+├── Daylight
+├── Night lights
+├── Terrain relief
+└── Solar position and illumination over time
+```
+
+Each display is checked on desktop and phone profiles using synthetic data and imagery;
+no production credentials or downloaded weather/NASA assets are needed. Shared checks cover
+grid validation, browser errors and fallbacks, the launcher, upload validation, and Worker
+HTTP/cache behavior. Actions summarizes the results and retains detailed logs for seven days.
+The refresh workflow also runs Python self-checks before fetching or publishing data.
+
+After adding the workflow to GitHub, require **`Self-check / Ready to release`** in the target
+branch's protection/ruleset to enforce it before merging. A publishing workflow can call this
+workflow through `workflow_call` and make publishing depend on its success. This workflow
+does not publish releases or deploy the site.
+
+See [test/README.md](test/README.md) for local commands, coverage and manual comparisons.
+
 ## How it works
 
 Everything lives in `public/js/wind.js` — one IIFE, no modules, sectioned as color scales →
@@ -822,9 +858,10 @@ python3.14 -m venv .venv
 source .venv/bin/activate
 ```
 
-`requirements.txt` pins the local refresh tools and AWS CLI. CI uses its separate
-Python 3.12 lock in `scripts/refresh-requirements.txt`. Activate `.venv` in each new
-terminal before refreshing or uploading data.
+`requirements.txt` pins the local refresh tools and AWS CLI, checked by the self-check
+workflow on Python 3.14. The scheduled refresh uses its separate Python 3.12 lock in
+`scripts/refresh-requirements.txt`. Activate `.venv` in each new terminal before refreshing
+or uploading data.
 
 When migrating to a clean machine, install Python 3.14 and run these setup commands
 again: `.venv/` is git-ignored and contains paths and binaries specific to its machine.

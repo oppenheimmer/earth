@@ -15,8 +15,8 @@ before(async () => {
     browser = await launch();
 });
 after(async () => {
-    await browser?.close();
-    await server?.close();
+    try { await browser?.close(); }
+    finally { await server?.close(); }
 });
 
 const fixtures = `

@@ -17,6 +17,7 @@ const SANDBOX = {ENABLED: "enabled", DISABLED: "disabled"};
 /** Launches a headless browser and resolves to {newPage, close}. */
 export async function launch() {
     const sandbox = process.env.EARTH_CHROME_SANDBOX || SANDBOX.ENABLED;
+    const candidates = process.env.EARTH_CHROME_BINARY ? [process.env.EARTH_CHROME_BINARY] : CHROME_CANDIDATES;
     if (!Object.values(SANDBOX).includes(sandbox)) {
         throw new Error("EARTH_CHROME_SANDBOX must be enabled or disabled");
     }
@@ -29,11 +30,12 @@ export async function launch() {
             const exited = new Promise(done => child.once("exit", done));
             if (child.kill("SIGKILL")) await exited;
         }
-        await rm(profile, {recursive: true, force: true});
+        // Chromium helpers can finish profile writes just after the main process exits.
+        await rm(profile, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
     };
 
     try {
-        for (const bin of CHROME_CANDIDATES) {
+        for (const bin of candidates) {
             child = spawn(bin, [
                 "--headless=new", "--disable-gpu",
                 ...(sandbox === SANDBOX.DISABLED ? ["--no-sandbox"] : []),
@@ -49,7 +51,7 @@ export async function launch() {
             if (started) break;
             child = null;
         }
-        if (!child) throw new Error("no chromium/chrome binary found (tried " + CHROME_CANDIDATES.join(", ") + ")");
+        if (!child) throw new Error("no chromium/chrome binary found (tried " + candidates.join(", ") + ")");
 
         // Read the OS-assigned port from this profile so concurrent launches cannot collide.
         let port;
